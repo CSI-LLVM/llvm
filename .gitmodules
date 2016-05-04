@@ -4,6 +4,3 @@
 [submodule "projects/compiler-rt"]
 	path = projects/compiler-rt
 	url = git@github.com:llvm-csi/compiler-rt.git
-[submodule "csi"]
-	path = csi
-	url = git@github.com:llvm-csi/csi.git
