@@ -1,0 +1,6 @@
+[submodule "tools/clang"]
+	path = tools/clang
+	url = git@github.com:llvm-csi/clang.git
+[submodule "projects/compiler-rt"]
+	path = projects/compiler-rt
+	url = git@github.com:llvm-csi/compiler-rt.git
