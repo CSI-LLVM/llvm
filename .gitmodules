@@ -1,9 +1,9 @@
 [submodule "tools/clang"]
 	path = tools/clang
-	url = git@github.com:llvm-csi/clang.git
+	url = git@github.com:CSI-LLVM/clang.git
 [submodule "projects/compiler-rt"]
 	path = projects/compiler-rt
-	url = git@github.com:llvm-csi/compiler-rt.git
+	url = git@github.com:CSI-LLVM/compiler-rt.git
 [submodule "csi"]
 	path = csi
-	url = git@github.com:llvm-csi/csi.git
+	url = git@github.com:CSI-LLVM/csi.git
