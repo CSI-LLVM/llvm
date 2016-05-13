@@ -36,22 +36,21 @@ STATISTIC(NumInstrumentedReads, "Number of instrumented reads");
 STATISTIC(NumInstrumentedWrites, "Number of instrumented writes");
 STATISTIC(NumAccessesWithBadSize, "Number of accesses with bad size");
 
-static const char *const CsiRtUnitInitName = "__csirt_unit_init";
-static const char *const CsiRtUnitCtorName = "csirt.unit_ctor";
-static const char *const CsiUnitBaseIdName = "__csi_unit_base_id";
-static const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
-static const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
+namespace {
+const char *const CsiRtUnitInitName = "__csirt_unit_init";
+const char *const CsiRtUnitCtorName = "csirt.unit_ctor";
+const char *const CsiUnitBaseIdName = "__csi_unit_base_id";
+const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
+const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 
-static const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
+const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
-static const int CsiUnitCtorPriority = 65535;
+const int CsiUnitCtorPriority = 65535;
 
 typedef struct {
-    int32_t line;
-    StringRef file;
+  int32_t line;
+  StringRef file;
 } fed_entry_t;
-
-namespace {
 
 typedef struct {
   unsigned unused;
@@ -134,7 +133,7 @@ private:
 
   std::map<std::string, uint64_t> FuncOffsetMap;
 }; //struct CodeSpectatorInterface
-} //namespace
+} // anonymous namespace
 
 // the address matters but not the init value
 char CodeSpectatorInterface::ID = 0;
