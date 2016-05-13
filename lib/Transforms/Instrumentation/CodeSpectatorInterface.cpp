@@ -49,15 +49,18 @@ const int CsiUnitCtorPriority = 65535;
 
 class InstrumentationIDSpace {
 public:
+  InstrumentationIDSpace() : BaseId(nullptr), IdCounter(0) {}
   InstrumentationIDSpace(GlobalVariable *Base) : BaseId(Base), IdCounter(0) {}
 
   Value *getNextID(IRBuilder<> IRB) {
+    assert(BaseId);
     Value *Base = IRB.CreateLoad(BaseId);
     Value *Offset = IRB.getInt64(IdCounter++);
     return IRB.CreateAdd(Base, Offset);
   }
 
   GlobalVariable *Base() const {
+    assert(BaseId);
     return BaseId;
   }
 private:
@@ -161,7 +164,7 @@ private:
 
   CallGraph *CG;
 
-  InstrumentationIDSpace *GlobalIdSpace;
+  InstrumentationIDSpace GlobalIdSpace;
   FrontEndDataTable FED;
 
   Function *CsiBeforeRead;
@@ -357,7 +360,7 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
 
   DILocation *Loc = I->getDebugLoc();
   FED.Add(Loc);
-  Value *CsiId = GlobalIdSpace->getNextID(IRB);
+  Value *CsiId = GlobalIdSpace.getNextID(IRB);
 
   if(IsWrite) {
     Res = addLoadStoreInstrumentation(
@@ -413,7 +416,7 @@ bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   DILocation *Loc = getFirstDebugLoc(BB);
   FED.Add(Loc);
   IRBuilder<> IRB(BB.getFirstInsertionPt());
-  Value *CsiId = GlobalIdSpace->getNextID(IRB);
+  Value *CsiId = GlobalIdSpace.getNextID(IRB);
 
   IRB.CreateCall(CsiBBEntry, {CsiId});
 
@@ -435,7 +438,7 @@ void CodeSpectatorInterface::instrumentCallsite(CallSite &CS) {
   DILocation *Loc = I->getDebugLoc();
   FED.Add(Loc);
   IRBuilder<> IRB(I);
-  Value *CsiId = GlobalIdSpace->getNextID(IRB);
+  Value *CsiId = GlobalIdSpace.getNextID(IRB);
 
   std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
   GlobalVariable *FuncIdGV = dyn_cast<GlobalVariable>(M->getOrInsertGlobal(GVName, IRB.getInt64Ty()));
@@ -464,7 +467,7 @@ void CodeSpectatorInterface::initializeIdSpaces(Module &M) {
 
   GlobalVariable *GV = new GlobalVariable(M, Int64Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int64Ty, 0), CsiUnitBaseIdName);
   assert(GV);
-  GlobalIdSpace = new InstrumentationIDSpace(GV);
+  GlobalIdSpace = InstrumentationIDSpace(GV);
 }
 
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
@@ -548,7 +551,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
 
   // Insert __csi_func_id_<f> weak symbols for all defined functions
   // and generate the runtime code that stores to all of them.
-  GlobalVariable *Base = GlobalIdSpace->Base();
+  GlobalVariable *Base = GlobalIdSpace.Base();
   LoadInst *LI = IRB.CreateLoad(Base);
   for (const auto &it : FuncOffsetMap) {
     std::string GVName = CsiFuncIdVariablePrefix + it.first;
@@ -574,8 +577,6 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   CallGraphNode *CNCtor = CG->getOrInsertFunction(Ctor);
   CallGraphNode *CNFunc = CG->getOrInsertFunction(InitFunction);
   CNCtor->addCalledFunction(Call, CNFunc);
-
-  delete GlobalIdSpace;
 }
 
 void CodeSpectatorInterface::getAnalysisUsage(AnalysisUsage &AU) const {
@@ -737,7 +738,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
 
   DISubprogram *Subprog = llvm::getDISubprogram(&F);
   FED.Add(Subprog);
-  Value *CsiId = GlobalIdSpace->getNextID(IRB);
+  Value *CsiId = GlobalIdSpace.getNextID(IRB);
 
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
   Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
