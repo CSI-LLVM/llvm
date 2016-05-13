@@ -70,16 +70,8 @@ private:
 
 class FrontEndDataTable {
 public:
-  struct Entry {
-    int32_t Line;
-    StringRef File;
-  };
-  typedef std::vector<Entry>::iterator iterator;
-
   FrontEndDataTable() {}
 
-  iterator begin() { return entries.begin(); }
-  iterator end() { return entries.end(); }
   uint64_t size() const { return entries.size(); }
 
   void Add(DILocation *Loc) {
@@ -98,13 +90,59 @@ public:
     }
   }
 
+  PointerType *GetPointerType(LLVMContext &C) const {
+    return PointerType::get(GetEntryStructType(C), 0);
+  }
+
+  Constant *InsertIntoModule(Module &M) const {
+    LLVMContext &C = M.getContext();
+    StructType *FedType = GetEntryStructType(C);
+    IntegerType *Int32Ty = IntegerType::get(C, 32);
+
+    Constant *Zero = ConstantInt::get(Int32Ty, 0);
+    Value *GepArgs[] = {Zero, Zero};
+
+    IRBuilder<> IRB(C);
+    SmallVector<Constant *, 4> EntryConstants;
+
+    for (EntryList::const_iterator it = entries.cbegin(), ite = entries.cend(); it != ite; ++it) {
+      const Entry &E = *it;
+      Value *Line = ConstantInt::get(Int32Ty, E.Line);
+
+      // TODO(ddoucet): It'd be nice to reuse the global variables since most
+      // module names will be the same. Do the pointers have the same value as well
+      // or do we actually have to hash the string?
+      Constant *FileStrConstant = ConstantDataArray::getString(C, E.File);
+      GlobalVariable *GV = new GlobalVariable(M, FileStrConstant->getType(),
+                                              true, GlobalValue::PrivateLinkage,
+                                              FileStrConstant, "", nullptr,
+                                              GlobalVariable::NotThreadLocal, 0);
+      GV->setUnnamedAddr(true);
+      Constant *File = ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
+
+      EntryConstants.push_back(ConstantStruct::get(FedType, Line, File, nullptr));
+    }
+
+    ArrayType *FedArrayType = ArrayType::get(GetEntryStructType(C), EntryConstants.size());
+    Constant *Table = ConstantArray::get(FedArrayType, EntryConstants);
+    GlobalVariable *GV = new GlobalVariable(M, FedArrayType, false, GlobalValue::InternalLinkage, Table, CsiUnitFedTableName);
+    return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
+  }
+
+private:
+  struct Entry {
+    int32_t Line;
+    StringRef File;
+  };
+  typedef std::vector<Entry> EntryList;
+
+  EntryList entries;
+
   StructType *GetEntryStructType(LLVMContext &C) const {
     return StructType::get(IntegerType::get(C, 32),
                            PointerType::get(IntegerType::get(C, 8), 0),
                            nullptr);
   }
-private:
-  std::vector<Entry> entries;
 };
 
 typedef struct {
@@ -158,9 +196,6 @@ private:
   bool ShouldNotInstrumentFunction(Function &F);
   void InitializeCsi(Module &M);
   void FinalizeCsi(Module &M);
-  Value *InsertFedTable(Module &M);
-
-  SmallVector<Constant *, 4> ConvertFEDEntriesToConsts(Module &M);
 
   CallGraph *CG;
 
@@ -480,53 +515,6 @@ void CodeSpectatorInterface::InitializeCsi(Module &M) {
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
 }
 
-SmallVector<Constant *, 4> CodeSpectatorInterface::ConvertFEDEntriesToConsts(Module &M) {
-  LLVMContext &C = M.getContext();
-  StructType *FedType = FED.GetEntryStructType(C);
-  IntegerType *Int32Ty = IntegerType::get(C, 32);
-
-  Constant *Zero = ConstantInt::get(Int32Ty, 0);
-  Value *GepArgs[] = {Zero, Zero};
-
-  IRBuilder<> IRB(C);
-  SmallVector<Constant *, 4> Ret;
-
-  for (FrontEndDataTable::iterator it = FED.begin(), ite = FED.end(); it != ite; ++it) {
-    const FrontEndDataTable::Entry &Entry = *it;
-    Value *Line = ConstantInt::get(Int32Ty, Entry.Line);
-
-    // TODO(ddoucet): It'd be nice to reuse the global variables since most
-    // module names will be the same. Do the pointers have the same value as well
-    // or do we actually have to hash the string?
-    Constant *FileStrConstant = ConstantDataArray::getString(C, Entry.File);
-    GlobalVariable *GV = new GlobalVariable(M, FileStrConstant->getType(),
-                                            true, GlobalValue::PrivateLinkage,
-                                            FileStrConstant, "", nullptr,
-                                            GlobalVariable::NotThreadLocal, 0);
-    GV->setUnnamedAddr(true);
-    Constant *File = ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
-
-    Ret.push_back(ConstantStruct::get(FedType, Line, File, nullptr));
-  }
-  return Ret;
-}
-
-// Returns a pointer to the first element
-Value *CodeSpectatorInterface::InsertFedTable(Module &M) {
-  LLVMContext &C = M.getContext();
-
-  SmallVector<Constant *, 4> FedEntries = ConvertFEDEntriesToConsts(M);
-  ArrayType *FedArrayType = ArrayType::get(FED.GetEntryStructType(C), FedEntries.size());
-
-  Constant *Table = ConstantArray::get(FedArrayType, FedEntries);
-  GlobalVariable *GV = new GlobalVariable(
-      M, FedArrayType, false, GlobalValue::InternalLinkage, Table, CsiUnitFedTableName);
-
-  Constant *Zero = ConstantInt::get(IntegerType::get(C, 32), 0);
-  Value *GepArgs[] = {Zero, Zero};
-  return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
-}
-
 void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   LLVMContext &C = M.getContext();
 
@@ -542,7 +530,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       IRB.getInt8PtrTy(),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
-      PointerType::get(FED.GetEntryStructType(C), 0)
+      FED.GetPointerType(C)
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
@@ -563,12 +551,14 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
     IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
   }
 
+  Constant *FEDPtr = FED.InsertIntoModule(M);
+
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
       IRB.CreateGlobalStringPtr(M.getName()),
       IRB.getInt64(FED.size()),
       Base,
-      InsertFedTable(M)
+      FEDPtr
   });
 
   // Add the constructor to the global list
