@@ -65,10 +65,40 @@ private:
   uint64_t IdCounter;
 };
 
-typedef struct {
-  int32_t line;
-  StringRef file;
-} fed_entry_t;
+class FrontEndDataTable {
+public:
+  struct Entry {
+    int32_t Line;
+    StringRef File;
+  };
+  typedef std::vector<Entry>::iterator iterator;
+
+  FrontEndDataTable() {}
+
+  iterator begin() { return entries.begin(); }
+  iterator end() { return entries.end(); }
+  uint64_t size() const { return entries.size(); }
+
+  void Add(DILocation *Loc) {
+    if (Loc) {
+      entries.push_back({(int32_t)Loc->getLine(), Loc->getFilename()});
+    } else {
+      entries.push_back({-1, ""});
+    }
+  }
+
+  void Add(DISubprogram *Subprog) {
+    if (Subprog) {
+      entries.push_back({(int32_t)Subprog->getLine(), Subprog->getFilename()});
+    } else {
+      entries.push_back({-1, ""});
+    }
+  }
+
+
+private:
+  std::vector<Entry> entries;
+};
 
 typedef struct {
   unsigned unused;
@@ -128,6 +158,7 @@ private:
   CallGraph *CG;
 
   InstrumentationIDSpace *GlobalIdSpace;
+  FrontEndDataTable FED;
 
   Function *CsiBeforeRead;
   Function *CsiAfterRead;
@@ -141,8 +172,6 @@ private:
   Function *CsiBeforeCallsite;
 
   Type *IntptrTy;
-
-  SmallVector<fed_entry_t, 4> FedEntries;
 
   std::map<std::string, uint64_t> FuncOffsetMap;
 }; //struct CodeSpectatorInterface
@@ -322,12 +351,8 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
 
   bool Res = false;
 
-  if (DILocation *Loc = I->getDebugLoc()) {
-    FedEntries.push_back(fed_entry_t{(int32_t)Loc->getLine(), Loc->getFilename()});
-  } else {
-    // Not much we can do here
-    FedEntries.push_back(fed_entry_t{-1, ""});
-  }
+  DILocation *Loc = I->getDebugLoc();
+  FED.Add(Loc);
   Value *CsiId = GlobalIdSpace->getNextID(IRB);
 
   if(IsWrite) {
@@ -381,13 +406,8 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
 }
 
 bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
-  if (DILocation *Loc = getFirstDebugLoc(BB)) {
-    FedEntries.push_back(fed_entry_t{(int32_t)Loc->getLine(), Loc->getFilename()});
-  } else {
-    // Not much we can do here
-    FedEntries.push_back(fed_entry_t{-1, ""});
-  }
-
+  DILocation *Loc = getFirstDebugLoc(BB);
+  FED.Add(Loc);
   IRBuilder<> IRB(BB.getFirstInsertionPt());
   Value *CsiId = GlobalIdSpace->getNextID(IRB);
 
@@ -408,12 +428,8 @@ void CodeSpectatorInterface::instrumentCallsite(CallSite &CS) {
       return;
   }
 
-  if (DILocation *Loc = I->getDebugLoc()) {
-    FedEntries.push_back(fed_entry_t{(int32_t)Loc->getLine(), Loc->getFilename()});
-  } else {
-    FedEntries.push_back(fed_entry_t{-1, ""});
-  }
-
+  DILocation *Loc = I->getDebugLoc();
+  FED.Add(Loc);
   IRBuilder<> IRB(I);
   Value *CsiId = GlobalIdSpace->getNextID(IRB);
 
@@ -475,13 +491,14 @@ SmallVector<Constant *, 4> CodeSpectatorInterface::ConvertFEDEntriesToConsts(Mod
   IRBuilder<> IRB(C);
   SmallVector<Constant *, 4> Ret;
 
-  for (fed_entry_t &Entry : FedEntries) {
-    Value *Line = ConstantInt::get(Int32Ty, Entry.line);
+  for (FrontEndDataTable::iterator it = FED.begin(), ite = FED.end(); it != ite; ++it) {
+    const FrontEndDataTable::Entry &Entry = *it;
+    Value *Line = ConstantInt::get(Int32Ty, Entry.Line);
 
     // TODO(ddoucet): It'd be nice to reuse the global variables since most
     // module names will be the same. Do the pointers have the same value as well
     // or do we actually have to hash the string?
-    Constant *FileStrConstant = ConstantDataArray::getString(C, Entry.file);
+    Constant *FileStrConstant = ConstantDataArray::getString(C, Entry.File);
     GlobalVariable *GV = new GlobalVariable(M, FileStrConstant->getType(),
                                             true, GlobalValue::PrivateLinkage,
                                             FileStrConstant, "", nullptr,
@@ -549,7 +566,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
       IRB.CreateGlobalStringPtr(M.getName()),
-      IRB.getInt64((int64_t)FedEntries.size()),
+      IRB.getInt64(FED.size()),
       Base,
       InsertFedTable(M)
   });
@@ -721,11 +738,8 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // Instrument function entry/exit points.
   IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
 
-  if (DISubprogram *Subprog = llvm::getDISubprogram(&F)) {
-    FedEntries.push_back(fed_entry_t{(int32_t)Subprog->getLine(), Subprog->getFilename()});
-  } else {
-    FedEntries.push_back(fed_entry_t{-1, ""});
-  }
+  DISubprogram *Subprog = llvm::getDISubprogram(&F);
+  FED.Add(Subprog);
   Value *CsiId = GlobalIdSpace->getNextID(IRB);
 
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
