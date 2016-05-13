@@ -95,7 +95,11 @@ public:
     }
   }
 
-
+  StructType *GetEntryStructType(LLVMContext &C) const {
+    return StructType::get(IntegerType::get(C, 32),
+                           PointerType::get(IntegerType::get(C, 8), 0),
+                           nullptr);
+  }
 private:
   std::vector<Entry> entries;
 };
@@ -473,16 +477,9 @@ void CodeSpectatorInterface::InitializeCsi(Module &M) {
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
 }
 
-StructType *CreateFedEntryType(LLVMContext &C) {
-  return StructType::get(
-      IntegerType::get(C, 32),
-      PointerType::get(IntegerType::get(C, 8), 0),
-      nullptr);
-}
-
 SmallVector<Constant *, 4> CodeSpectatorInterface::ConvertFEDEntriesToConsts(Module &M) {
   LLVMContext &C = M.getContext();
-  StructType *FedType = CreateFedEntryType(C);
+  StructType *FedType = FED.GetEntryStructType(C);
   IntegerType *Int32Ty = IntegerType::get(C, 32);
 
   Constant *Zero = ConstantInt::get(Int32Ty, 0);
@@ -516,7 +513,7 @@ Value *CodeSpectatorInterface::InsertFedTable(Module &M) {
   LLVMContext &C = M.getContext();
 
   SmallVector<Constant *, 4> FedEntries = ConvertFEDEntriesToConsts(M);
-  ArrayType *FedArrayType = ArrayType::get(CreateFedEntryType(C), FedEntries.size());
+  ArrayType *FedArrayType = ArrayType::get(FED.GetEntryStructType(C), FedEntries.size());
 
   Constant *Table = ConstantArray::get(FedArrayType, FedEntries);
   GlobalVariable *GV = new GlobalVariable(
@@ -542,7 +539,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       IRB.getInt8PtrTy(),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
-      PointerType::get(CreateFedEntryType(C), 0)
+      PointerType::get(FED.GetEntryStructType(C), 0)
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
