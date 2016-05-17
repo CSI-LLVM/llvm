@@ -50,7 +50,13 @@ const int CsiUnitCtorPriority = 65535;
 class FrontEndDataTable {
 public:
   FrontEndDataTable() {}
-  FrontEndDataTable(GlobalVariable *BaseId) : idSpace(IdSpace(BaseId)) {}
+  FrontEndDataTable(Module &M, StringRef BaseIdName) {
+    LLVMContext &C = M.getContext();
+    IntegerType *Int64Ty = IntegerType::get(C, 64);
+    GlobalVariable *GV = new GlobalVariable(M, Int64Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int64Ty, 0), BaseIdName);
+    assert(GV);
+    idSpace = IdSpace(GV);
+  }
 
   uint64_t size() const { return entries.size(); }
 
@@ -518,12 +524,7 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 }
 
 void CodeSpectatorInterface::initializeFEDTables(Module &M) {
-  LLVMContext &C = M.getContext();
-  IntegerType *Int64Ty = IntegerType::get(C, 64);
-
-  GlobalVariable *GV = new GlobalVariable(M, Int64Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int64Ty, 0), CsiUnitBaseIdName);
-  assert(GV);
-  FED = FrontEndDataTable(GV);
+  FED = FrontEndDataTable(M, CsiUnitBaseIdName);
 }
 
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
