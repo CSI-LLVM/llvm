@@ -41,6 +41,7 @@ const char *const CsiRtUnitInitName = "__csirt_unit_init";
 const char *const CsiRtUnitCtorName = "csirt.unit_ctor";
 const char *const CsiUnitBaseIdName = "__csi_unit_base_id";
 const char *const CsiFunctionBaseIdName = "__csi_unit_func_base_id";
+const char *const CsiBasicBlockBaseIdName = "__csi_unit_bb_base_id";
 const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 
@@ -229,7 +230,7 @@ private:
 
   CallGraph *CG;
 
-  FrontEndDataTable FED, FunctionFED;
+  FrontEndDataTable FED, FunctionFED, BasicBlockFED;
 
   Function *CsiBeforeRead;
   Function *CsiAfterRead;
@@ -479,8 +480,8 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
 bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   IRBuilder<> IRB(BB.getFirstInsertionPt());
   DILocation *Loc = getFirstDebugLoc(BB);
-  uint64_t LocalId = FED.add(Loc);
-  Value *CsiId = FED.localToGlobalId(LocalId, IRB);
+  uint64_t LocalId = BasicBlockFED.add(Loc);
+  Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
 
   IRB.CreateCall(CsiBBEntry, {CsiId});
 
@@ -528,6 +529,7 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 void CodeSpectatorInterface::initializeFEDTables(Module &M) {
   FED = FrontEndDataTable(M, CsiUnitBaseIdName);
   FunctionFED = FrontEndDataTable(M, CsiFunctionBaseIdName);
+  BasicBlockFED = FrontEndDataTable(M, CsiBasicBlockBaseIdName);
 }
 
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
@@ -558,7 +560,10 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       FED.getPointerType(C),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
-      FunctionFED.getPointerType(C)
+      FunctionFED.getPointerType(C),
+      IRB.getInt64Ty(),
+      PointerType::get(IRB.getInt64Ty(), 0),
+      BasicBlockFED.getPointerType(C)
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
@@ -580,7 +585,8 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   }
 
   Constant *FEDPtr = FED.insertIntoModule(M),
-    *FunctionFEDPtr = FunctionFED.insertIntoModule(M);
+    *FunctionFEDPtr = FunctionFED.insertIntoModule(M),
+    *BasicBlockFEDPtr = BasicBlockFED.insertIntoModule(M);
 
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
@@ -590,7 +596,10 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       FEDPtr,
       IRB.getInt64(FunctionFED.size()),
       FunctionFED.baseId(),
-      FunctionFEDPtr
+      FunctionFEDPtr,
+      IRB.getInt64(BasicBlockFED.size()),
+      BasicBlockFED.baseId(),
+      BasicBlockFEDPtr
   });
 
   // Add the constructor to the global list
