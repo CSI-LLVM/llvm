@@ -54,19 +54,23 @@ public:
 
   uint64_t size() const { return entries.size(); }
 
-  uint64_t Add(DILocation *Loc) {
+  GlobalVariable *baseId() const {
+    return idSpace.base();
+  }
+
+  uint64_t add(DILocation *Loc) {
     if (Loc) {
-      return Add((int32_t)Loc->getLine(), Loc->getFilename());
+      return add((int32_t)Loc->getLine(), Loc->getFilename());
     } else {
-      return Add(-1, "");
+      return add(-1, "");
     }
   }
 
-  uint64_t Add(DISubprogram *Subprog) {
+  uint64_t add(DISubprogram *Subprog) {
     if (Subprog) {
-      return Add((int32_t)Subprog->getLine(), Subprog->getFilename());
+      return add((int32_t)Subprog->getLine(), Subprog->getFilename());
     } else {
-      return Add(-1, "");
+      return add(-1, "");
     }
   }
 
@@ -74,17 +78,13 @@ public:
     return idSpace.localToGlobalId(LocalId, IRB);
   }
 
-  GlobalVariable *BaseId() const {
-    return idSpace.Base();
+  PointerType *getPointerType(LLVMContext &C) const {
+    return PointerType::get(getEntryStructType(C), 0);
   }
 
-  PointerType *GetPointerType(LLVMContext &C) const {
-    return PointerType::get(GetEntryStructType(C), 0);
-  }
-
-  Constant *InsertIntoModule(Module &M) const {
+  Constant *insertIntoModule(Module &M) const {
     LLVMContext &C = M.getContext();
-    StructType *FedType = GetEntryStructType(C);
+    StructType *FedType = getEntryStructType(C);
     IntegerType *Int32Ty = IntegerType::get(C, 32);
 
     Constant *Zero = ConstantInt::get(Int32Ty, 0);
@@ -111,7 +111,7 @@ public:
       EntryConstants.push_back(ConstantStruct::get(FedType, Line, File, nullptr));
     }
 
-    ArrayType *FedArrayType = ArrayType::get(GetEntryStructType(C), EntryConstants.size());
+    ArrayType *FedArrayType = ArrayType::get(getEntryStructType(C), EntryConstants.size());
     Constant *Table = ConstantArray::get(FedArrayType, EntryConstants);
     GlobalVariable *GV = new GlobalVariable(M, FedArrayType, false, GlobalValue::InternalLinkage, Table, CsiUnitFedTableName);
     return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
@@ -134,7 +134,7 @@ private:
       return IRB.CreateAdd(Base, Offset);
     }
 
-    GlobalVariable *Base() const {
+    GlobalVariable *base() const {
       assert(BaseId);
       return BaseId;
     }
@@ -153,13 +153,13 @@ private:
   EntryList entries;
   IdSpace idSpace;
 
-  StructType *GetEntryStructType(LLVMContext &C) const {
+  StructType *getEntryStructType(LLVMContext &C) const {
     return StructType::get(IntegerType::get(C, 32),
                            PointerType::get(IntegerType::get(C, 8), 0),
                            nullptr);
   }
 
-  uint64_t Add(int32_t Line, StringRef File) {
+  uint64_t add(int32_t Line, StringRef File) {
     uint64_t Id = idSpace.getNextLocalId();
     assert(entries.find(id) == entries.end() && "Id already exists in FED table.");
     entries[Id] = { Line, File };
@@ -415,7 +415,7 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
   bool Res = false;
 
   DILocation *Loc = I->getDebugLoc();
-  uint64_t LocalId = FED.Add(Loc);
+  uint64_t LocalId = FED.add(Loc);
   Value *CsiId = FED.localToGlobalId(LocalId, IRB);
 
   if(IsWrite) {
@@ -471,7 +471,7 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
 bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   IRBuilder<> IRB(BB.getFirstInsertionPt());
   DILocation *Loc = getFirstDebugLoc(BB);
-  uint64_t LocalId = FED.Add(Loc);
+  uint64_t LocalId = FED.add(Loc);
   Value *CsiId = FED.localToGlobalId(LocalId, IRB);
 
   IRB.CreateCall(CsiBBEntry, {CsiId});
@@ -493,7 +493,7 @@ void CodeSpectatorInterface::instrumentCallsite(CallSite &CS) {
 
   IRBuilder<> IRB(I);
   DILocation *Loc = I->getDebugLoc();
-  uint64_t LocalId = FED.Add(Loc);
+  uint64_t LocalId = FED.add(Loc);
   Value *CsiId = FED.localToGlobalId(LocalId, IRB);
 
   std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
@@ -551,7 +551,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       IRB.getInt8PtrTy(),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
-      FED.GetPointerType(C)
+      FED.getPointerType(C)
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
@@ -560,7 +560,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
 
   // Insert __csi_func_id_<f> weak symbols for all defined functions
   // and generate the runtime code that stores to all of them.
-  GlobalVariable *Base = FED.BaseId();
+  GlobalVariable *Base = FED.baseId();
   LoadInst *LI = IRB.CreateLoad(Base);
   for (const auto &it : FuncOffsetMap) {
     std::string GVName = CsiFuncIdVariablePrefix + it.first;
@@ -572,7 +572,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
     IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
   }
 
-  Constant *FEDPtr = FED.InsertIntoModule(M);
+  Constant *FEDPtr = FED.insertIntoModule(M);
 
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
@@ -748,7 +748,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
 
   DISubprogram *Subprog = llvm::getDISubprogram(&F);
-  uint64_t LocalId = FED.Add(Subprog);
+  uint64_t LocalId = FED.add(Subprog);
   Value *CsiId = FED.localToGlobalId(LocalId, IRB);
 
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
