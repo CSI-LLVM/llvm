@@ -70,7 +70,7 @@ public:
     }
   }
 
-  Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) {
+  Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const {
     return idSpace.localToGlobalId(LocalId, IRB);
   }
 
