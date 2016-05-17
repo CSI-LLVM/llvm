@@ -41,6 +41,7 @@ const char *const CsiRtUnitInitName = "__csirt_unit_init";
 const char *const CsiRtUnitCtorName = "csirt.unit_ctor";
 const char *const CsiUnitBaseIdName = "__csi_unit_base_id";
 const char *const CsiFunctionBaseIdName = "__csi_unit_func_base_id";
+const char *const CsiFunctionExitBaseIdName = "__csi_unit_func_exit_base_id";
 const char *const CsiBasicBlockBaseIdName = "__csi_unit_bb_base_id";
 const char *const CsiCallsiteBaseIdName = "__csi_unit_callsite_base_id";
 const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
@@ -231,7 +232,7 @@ private:
 
   CallGraph *CG;
 
-  FrontEndDataTable FED, FunctionFED, BasicBlockFED, CallsiteFED;
+  FrontEndDataTable FED, FunctionFED, FunctionExitFED, BasicBlockFED, CallsiteFED;
 
   Function *CsiBeforeRead;
   Function *CsiAfterRead;
@@ -530,6 +531,7 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 void CodeSpectatorInterface::initializeFEDTables(Module &M) {
   FED = FrontEndDataTable(M, CsiUnitBaseIdName);
   FunctionFED = FrontEndDataTable(M, CsiFunctionBaseIdName);
+  FunctionExitFED = FrontEndDataTable(M, CsiFunctionExitBaseIdName);
   BasicBlockFED = FrontEndDataTable(M, CsiBasicBlockBaseIdName);
   CallsiteFED = FrontEndDataTable(M, CsiCallsiteBaseIdName);
 }
@@ -565,6 +567,9 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       FunctionFED.getPointerType(C),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
+      FunctionExitFED.getPointerType(C),
+      IRB.getInt64Ty(),
+      PointerType::get(IRB.getInt64Ty(), 0),
       BasicBlockFED.getPointerType(C),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
@@ -591,6 +596,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
 
   Constant *FEDPtr = FED.insertIntoModule(M),
     *FunctionFEDPtr = FunctionFED.insertIntoModule(M),
+    *FunctionExitFEDPtr = FunctionExitFED.insertIntoModule(M),
     *BasicBlockFEDPtr = BasicBlockFED.insertIntoModule(M),
     *CallsiteFEDPtr = CallsiteFED.insertIntoModule(M);
 
@@ -603,6 +609,9 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       IRB.getInt64(FunctionFED.size()),
       FunctionFED.baseId(),
       FunctionFEDPtr,
+      IRB.getInt64(FunctionExitFED.size()),
+      FunctionExitFED.baseId(),
+      FunctionExitFEDPtr,
       IRB.getInt64(BasicBlockFED.size()),
       BasicBlockFED.baseId(),
       BasicBlockFEDPtr,
@@ -790,7 +799,9 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   for (BasicBlock::iterator I : RetVec) {
       Instruction *RetInst = &(*I);
       IRBuilder<> IRBRet(RetInst);
-      IRBRet.CreateCall(CsiFuncExit, {CsiId, Function, ReturnAddress, FunctionName});
+      uint64_t ExitLocalId = FunctionExitFED.add(Subprog);
+      Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
+      IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, Function, ReturnAddress, FunctionName});
   }
   Modified = true;
 
