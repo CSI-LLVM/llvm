@@ -39,7 +39,6 @@ STATISTIC(NumAccessesWithBadSize, "Number of accesses with bad size");
 namespace {
 const char *const CsiRtUnitInitName = "__csirt_unit_init";
 const char *const CsiRtUnitCtorName = "csirt.unit_ctor";
-const char *const CsiUnitBaseIdName = "__csi_unit_base_id";
 const char *const CsiFunctionBaseIdName = "__csi_unit_func_base_id";
 const char *const CsiFunctionExitBaseIdName = "__csi_unit_func_exit_base_id";
 const char *const CsiBasicBlockBaseIdName = "__csi_unit_bb_base_id";
@@ -234,7 +233,7 @@ private:
 
   CallGraph *CG;
 
-  FrontEndDataTable FED, FunctionFED, FunctionExitFED, BasicBlockFED,
+  FrontEndDataTable FunctionFED, FunctionExitFED, BasicBlockFED,
     CallsiteFED, LoadFED, StoreFED;
 
   Function *CsiBeforeRead;
@@ -533,7 +532,6 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 }
 
 void CodeSpectatorInterface::initializeFEDTables(Module &M) {
-  FED = FrontEndDataTable(M, CsiUnitBaseIdName);
   FunctionFED = FrontEndDataTable(M, CsiFunctionBaseIdName);
   FunctionExitFED = FrontEndDataTable(M, CsiFunctionExitBaseIdName);
   BasicBlockFED = FrontEndDataTable(M, CsiBasicBlockBaseIdName);
@@ -565,9 +563,6 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   // Lookup __csirt_unit_init
   SmallVector<Type *, 4> InitArgTypes({
       IRB.getInt8PtrTy(),
-      IRB.getInt64Ty(),
-      PointerType::get(IRB.getInt64Ty(), 0),
-      FED.getPointerType(C),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
       FunctionFED.getPointerType(C),
@@ -606,8 +601,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
     IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
   }
 
-  Constant *FEDPtr = FED.insertIntoModule(M),
-    *FunctionFEDPtr = FunctionFED.insertIntoModule(M),
+  Constant *FunctionFEDPtr = FunctionFED.insertIntoModule(M),
     *FunctionExitFEDPtr = FunctionExitFED.insertIntoModule(M),
     *BasicBlockFEDPtr = BasicBlockFED.insertIntoModule(M),
     *CallsiteFEDPtr = CallsiteFED.insertIntoModule(M),
@@ -617,9 +611,6 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
       IRB.CreateGlobalStringPtr(M.getName()),
-      IRB.getInt64(FED.size()),
-      FED.baseId(),
-      FEDPtr,
       IRB.getInt64(FunctionFED.size()),
       FunctionFED.baseId(),
       FunctionFEDPtr,
