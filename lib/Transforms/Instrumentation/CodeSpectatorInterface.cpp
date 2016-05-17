@@ -52,10 +52,14 @@ public:
   InstrumentationIDSpace() : BaseId(nullptr), IdCounter(0) {}
   InstrumentationIDSpace(GlobalVariable *Base) : BaseId(Base), IdCounter(0) {}
 
-  Value *getNextID(IRBuilder<> IRB) {
+  uint64_t getNextLocalId() {
+    return IdCounter++;
+  }
+
+  Value *localToGlobalId(uint64_t Id, IRBuilder<> IRB) const {
     assert(BaseId);
     Value *Base = IRB.CreateLoad(BaseId);
-    Value *Offset = IRB.getInt64(IdCounter++);
+    Value *Offset = IRB.getInt64(Id);
     return IRB.CreateAdd(Base, Offset);
   }
 
@@ -74,19 +78,19 @@ public:
 
   uint64_t size() const { return entries.size(); }
 
-  void Add(DILocation *Loc) {
+  void Add(uint64_t Id, DILocation *Loc) {
     if (Loc) {
-      entries.push_back({(int32_t)Loc->getLine(), Loc->getFilename()});
+      Add(Id, (int32_t)Loc->getLine(), Loc->getFilename());
     } else {
-      entries.push_back({-1, ""});
+      Add(Id, -1, "");
     }
   }
 
-  void Add(DISubprogram *Subprog) {
+  void Add(uint64_t Id, DISubprogram *Subprog) {
     if (Subprog) {
-      entries.push_back({(int32_t)Subprog->getLine(), Subprog->getFilename()});
+      Add(Id, (int32_t)Subprog->getLine(), Subprog->getFilename());
     } else {
-      entries.push_back({-1, ""});
+      Add(Id, -1, "");
     }
   }
 
@@ -106,7 +110,7 @@ public:
     SmallVector<Constant *, 4> EntryConstants;
 
     for (EntryList::const_iterator it = entries.cbegin(), ite = entries.cend(); it != ite; ++it) {
-      const Entry &E = *it;
+      const Entry &E = it->second;
       Value *Line = ConstantInt::get(Int32Ty, E.Line);
 
       // TODO(ddoucet): It'd be nice to reuse the global variables since most
@@ -134,7 +138,7 @@ private:
     int32_t Line;
     StringRef File;
   };
-  typedef std::vector<Entry> EntryList;
+  typedef std::map<uint64_t, Entry> EntryList;
 
   EntryList entries;
 
@@ -142,6 +146,11 @@ private:
     return StructType::get(IntegerType::get(C, 32),
                            PointerType::get(IntegerType::get(C, 8), 0),
                            nullptr);
+  }
+
+  void Add(uint64_t Id, int32_t Line, StringRef File) {
+    assert(entries.find(id) == entries.end() && "Id already exists in FED table.");
+    entries[Id] = { Line, File };
   }
 };
 
@@ -393,9 +402,11 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
 
   bool Res = false;
 
+  uint64_t LocalId = GlobalIdSpace.getNextLocalId();
   DILocation *Loc = I->getDebugLoc();
-  FED.Add(Loc);
-  Value *CsiId = GlobalIdSpace.getNextID(IRB);
+  FED.Add(LocalId, Loc);
+
+  Value *CsiId = GlobalIdSpace.localToGlobalId(LocalId, IRB);
 
   if(IsWrite) {
     Res = addLoadStoreInstrumentation(
@@ -449,9 +460,10 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
 
 bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   DILocation *Loc = getFirstDebugLoc(BB);
-  FED.Add(Loc);
+  uint64_t LocalId = GlobalIdSpace.getNextLocalId();
+  FED.Add(LocalId, Loc);
   IRBuilder<> IRB(BB.getFirstInsertionPt());
-  Value *CsiId = GlobalIdSpace.getNextID(IRB);
+  Value *CsiId = GlobalIdSpace.localToGlobalId(LocalId, IRB);
 
   IRB.CreateCall(CsiBBEntry, {CsiId});
 
@@ -471,9 +483,10 @@ void CodeSpectatorInterface::instrumentCallsite(CallSite &CS) {
   }
 
   DILocation *Loc = I->getDebugLoc();
-  FED.Add(Loc);
+  uint64_t LocalId = GlobalIdSpace.getNextLocalId();
+  FED.Add(LocalId, Loc);
   IRBuilder<> IRB(I);
-  Value *CsiId = GlobalIdSpace.getNextID(IRB);
+  Value *CsiId = GlobalIdSpace.localToGlobalId(LocalId, IRB);
 
   std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
   GlobalVariable *FuncIdGV = dyn_cast<GlobalVariable>(M->getOrInsertGlobal(GVName, IRB.getInt64Ty()));
@@ -727,8 +740,9 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
 
   DISubprogram *Subprog = llvm::getDISubprogram(&F);
-  FED.Add(Subprog);
-  Value *CsiId = GlobalIdSpace.getNextID(IRB);
+  uint64_t LocalId = GlobalIdSpace.getNextLocalId();
+  FED.Add(LocalId, Subprog);
+  Value *CsiId = GlobalIdSpace.localToGlobalId(LocalId, IRB);
 
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
   Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
