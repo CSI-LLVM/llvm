@@ -159,6 +159,7 @@ private:
   EntryList entries;
   IdSpace idSpace;
 
+  // Create a struct type to match the "struct fed_entry" defined in csirt.c
   StructType *getEntryStructType(LLVMContext &C) const {
     return StructType::get(IntegerType::get(C, 32),
                            PointerType::get(IntegerType::get(C, 8), 0),
