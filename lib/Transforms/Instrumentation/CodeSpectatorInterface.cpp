@@ -40,6 +40,7 @@ namespace {
 const char *const CsiRtUnitInitName = "__csirt_unit_init";
 const char *const CsiRtUnitCtorName = "csirt.unit_ctor";
 const char *const CsiUnitBaseIdName = "__csi_unit_base_id";
+const char *const CsiFunctionBaseIdName = "__csi_unit_func_base_id";
 const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 
@@ -228,7 +229,7 @@ private:
 
   CallGraph *CG;
 
-  FrontEndDataTable FED;
+  FrontEndDataTable FED, FunctionFED;
 
   Function *CsiBeforeRead;
   Function *CsiAfterRead;
@@ -526,6 +527,7 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
 
 void CodeSpectatorInterface::initializeFEDTables(Module &M) {
   FED = FrontEndDataTable(M, CsiUnitBaseIdName);
+  FunctionFED = FrontEndDataTable(M, CsiFunctionBaseIdName);
 }
 
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
@@ -553,7 +555,10 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       IRB.getInt8PtrTy(),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
-      FED.getPointerType(C)
+      FED.getPointerType(C),
+      IRB.getInt64Ty(),
+      PointerType::get(IRB.getInt64Ty(), 0),
+      FunctionFED.getPointerType(C)
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
@@ -562,7 +567,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
 
   // Insert __csi_func_id_<f> weak symbols for all defined functions
   // and generate the runtime code that stores to all of them.
-  GlobalVariable *Base = FED.baseId();
+  GlobalVariable *Base = FunctionFED.baseId();
   LoadInst *LI = IRB.CreateLoad(Base);
   for (const auto &it : FuncOffsetMap) {
     std::string GVName = CsiFuncIdVariablePrefix + it.first;
@@ -574,14 +579,18 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
     IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
   }
 
-  Constant *FEDPtr = FED.insertIntoModule(M);
+  Constant *FEDPtr = FED.insertIntoModule(M),
+    *FunctionFEDPtr = FunctionFED.insertIntoModule(M);
 
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
       IRB.CreateGlobalStringPtr(M.getName()),
       IRB.getInt64(FED.size()),
-      Base,
-      FEDPtr
+      FED.baseId(),
+      FEDPtr,
+      IRB.getInt64(FunctionFED.size()),
+      FunctionFED.baseId(),
+      FunctionFEDPtr
   });
 
   // Add the constructor to the global list
@@ -750,8 +759,8 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
 
   DISubprogram *Subprog = llvm::getDISubprogram(&F);
-  uint64_t LocalId = FED.add(Subprog);
-  Value *CsiId = FED.localToGlobalId(LocalId, IRB);
+  uint64_t LocalId = FunctionFED.add(Subprog);
+  Value *CsiId = FunctionFED.localToGlobalId(LocalId, IRB);
 
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
   Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
