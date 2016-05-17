@@ -47,51 +47,35 @@ const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
 const int CsiUnitCtorPriority = 65535;
 
-class InstrumentationIDSpace {
-public:
-  InstrumentationIDSpace() : BaseId(nullptr), IdCounter(0) {}
-  InstrumentationIDSpace(GlobalVariable *Base) : BaseId(Base), IdCounter(0) {}
-
-  uint64_t getNextLocalId() {
-    return IdCounter++;
-  }
-
-  Value *localToGlobalId(uint64_t Id, IRBuilder<> IRB) const {
-    assert(BaseId);
-    Value *Base = IRB.CreateLoad(BaseId);
-    Value *Offset = IRB.getInt64(Id);
-    return IRB.CreateAdd(Base, Offset);
-  }
-
-  GlobalVariable *Base() const {
-    assert(BaseId);
-    return BaseId;
-  }
-private:
-  GlobalVariable *BaseId;
-  uint64_t IdCounter;
-};
-
 class FrontEndDataTable {
 public:
   FrontEndDataTable() {}
+  FrontEndDataTable(GlobalVariable *BaseId) : idSpace(IdSpace(BaseId)) {}
 
   uint64_t size() const { return entries.size(); }
 
-  void Add(uint64_t Id, DILocation *Loc) {
+  uint64_t Add(DILocation *Loc) {
     if (Loc) {
-      Add(Id, (int32_t)Loc->getLine(), Loc->getFilename());
+      return Add((int32_t)Loc->getLine(), Loc->getFilename());
     } else {
-      Add(Id, -1, "");
+      return Add(-1, "");
     }
   }
 
-  void Add(uint64_t Id, DISubprogram *Subprog) {
+  uint64_t Add(DISubprogram *Subprog) {
     if (Subprog) {
-      Add(Id, (int32_t)Subprog->getLine(), Subprog->getFilename());
+      return Add((int32_t)Subprog->getLine(), Subprog->getFilename());
     } else {
-      Add(Id, -1, "");
+      return Add(-1, "");
     }
+  }
+
+  Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) {
+    return idSpace.localToGlobalId(LocalId, IRB);
+  }
+
+  GlobalVariable *BaseId() const {
+    return idSpace.Base();
   }
 
   PointerType *GetPointerType(LLVMContext &C) const {
@@ -134,13 +118,40 @@ public:
   }
 
 private:
+  class IdSpace {
+  public:
+    IdSpace() : BaseId(nullptr), IdCounter(0) {}
+    IdSpace(GlobalVariable *Base) : BaseId(Base), IdCounter(0) {}
+
+    uint64_t getNextLocalId() {
+      return IdCounter++;
+    }
+
+    Value *localToGlobalId(uint64_t Id, IRBuilder<> IRB) const {
+      assert(BaseId);
+      Value *Base = IRB.CreateLoad(BaseId);
+      Value *Offset = IRB.getInt64(Id);
+      return IRB.CreateAdd(Base, Offset);
+    }
+
+    GlobalVariable *Base() const {
+      assert(BaseId);
+      return BaseId;
+    }
+  private:
+    GlobalVariable *BaseId;
+    uint64_t IdCounter;
+  };
+
   struct Entry {
     int32_t Line;
     StringRef File;
   };
+
   typedef std::map<uint64_t, Entry> EntryList;
 
   EntryList entries;
+  IdSpace idSpace;
 
   StructType *GetEntryStructType(LLVMContext &C) const {
     return StructType::get(IntegerType::get(C, 32),
@@ -148,9 +159,11 @@ private:
                            nullptr);
   }
 
-  void Add(uint64_t Id, int32_t Line, StringRef File) {
+  uint64_t Add(int32_t Line, StringRef File) {
+    uint64_t Id = idSpace.getNextLocalId();
     assert(entries.find(id) == entries.end() && "Id already exists in FED table.");
     entries[Id] = { Line, File };
+    return Id;
   }
 };
 
@@ -181,7 +194,7 @@ private:
   // Basic block entry and exit instrumentation
   void initializeBasicBlockCallbacks(Module &M);
   void initializeCallsiteCallbacks(Module &M);
-  void initializeIdSpaces(Module &M);
+  void initializeFEDTables(Module &M);
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
 
@@ -208,7 +221,6 @@ private:
 
   CallGraph *CG;
 
-  InstrumentationIDSpace GlobalIdSpace;
   FrontEndDataTable FED;
 
   Function *CsiBeforeRead;
@@ -402,11 +414,9 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
 
   bool Res = false;
 
-  uint64_t LocalId = GlobalIdSpace.getNextLocalId();
   DILocation *Loc = I->getDebugLoc();
-  FED.Add(LocalId, Loc);
-
-  Value *CsiId = GlobalIdSpace.localToGlobalId(LocalId, IRB);
+  uint64_t LocalId = FED.Add(Loc);
+  Value *CsiId = FED.localToGlobalId(LocalId, IRB);
 
   if(IsWrite) {
     Res = addLoadStoreInstrumentation(
@@ -459,11 +469,10 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
 }
 
 bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
-  DILocation *Loc = getFirstDebugLoc(BB);
-  uint64_t LocalId = GlobalIdSpace.getNextLocalId();
-  FED.Add(LocalId, Loc);
   IRBuilder<> IRB(BB.getFirstInsertionPt());
-  Value *CsiId = GlobalIdSpace.localToGlobalId(LocalId, IRB);
+  DILocation *Loc = getFirstDebugLoc(BB);
+  uint64_t LocalId = FED.Add(Loc);
+  Value *CsiId = FED.localToGlobalId(LocalId, IRB);
 
   IRB.CreateCall(CsiBBEntry, {CsiId});
 
@@ -482,11 +491,10 @@ void CodeSpectatorInterface::instrumentCallsite(CallSite &CS) {
       return;
   }
 
-  DILocation *Loc = I->getDebugLoc();
-  uint64_t LocalId = GlobalIdSpace.getNextLocalId();
-  FED.Add(LocalId, Loc);
   IRBuilder<> IRB(I);
-  Value *CsiId = GlobalIdSpace.localToGlobalId(LocalId, IRB);
+  DILocation *Loc = I->getDebugLoc();
+  uint64_t LocalId = FED.Add(Loc);
+  Value *CsiId = FED.localToGlobalId(LocalId, IRB);
 
   std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
   GlobalVariable *FuncIdGV = dyn_cast<GlobalVariable>(M->getOrInsertGlobal(GVName, IRB.getInt64Ty()));
@@ -509,17 +517,17 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   return true;
 }
 
-void CodeSpectatorInterface::initializeIdSpaces(Module &M) {
+void CodeSpectatorInterface::initializeFEDTables(Module &M) {
   LLVMContext &C = M.getContext();
   IntegerType *Int64Ty = IntegerType::get(C, 64);
 
   GlobalVariable *GV = new GlobalVariable(M, Int64Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int64Ty, 0), CsiUnitBaseIdName);
   assert(GV);
-  GlobalIdSpace = InstrumentationIDSpace(GV);
+  FED = FrontEndDataTable(GV);
 }
 
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
-  initializeIdSpaces(M);
+  initializeFEDTables(M);
   initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
   initializeBasicBlockCallbacks(M);
@@ -552,7 +560,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
 
   // Insert __csi_func_id_<f> weak symbols for all defined functions
   // and generate the runtime code that stores to all of them.
-  GlobalVariable *Base = GlobalIdSpace.Base();
+  GlobalVariable *Base = FED.BaseId();
   LoadInst *LI = IRB.CreateLoad(Base);
   for (const auto &it : FuncOffsetMap) {
     std::string GVName = CsiFuncIdVariablePrefix + it.first;
@@ -740,9 +748,8 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
 
   DISubprogram *Subprog = llvm::getDISubprogram(&F);
-  uint64_t LocalId = GlobalIdSpace.getNextLocalId();
-  FED.Add(LocalId, Subprog);
-  Value *CsiId = GlobalIdSpace.localToGlobalId(LocalId, IRB);
+  uint64_t LocalId = FED.Add(Subprog);
+  Value *CsiId = FED.localToGlobalId(LocalId, IRB);
 
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
   Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
