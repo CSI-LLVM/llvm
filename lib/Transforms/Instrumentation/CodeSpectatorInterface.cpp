@@ -44,6 +44,8 @@ const char *const CsiFunctionBaseIdName = "__csi_unit_func_base_id";
 const char *const CsiFunctionExitBaseIdName = "__csi_unit_func_exit_base_id";
 const char *const CsiBasicBlockBaseIdName = "__csi_unit_bb_base_id";
 const char *const CsiCallsiteBaseIdName = "__csi_unit_callsite_base_id";
+const char *const CsiLoadBaseIdName = "__csi_unit_load_base_id";
+const char *const CsiStoreBaseIdName = "__csi_unit_store_base_id";
 const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 
@@ -232,7 +234,8 @@ private:
 
   CallGraph *CG;
 
-  FrontEndDataTable FED, FunctionFED, FunctionExitFED, BasicBlockFED, CallsiteFED;
+  FrontEndDataTable FED, FunctionFED, FunctionExitFED, BasicBlockFED,
+    CallsiteFED, LoadFED, StoreFED;
 
   Function *CsiBeforeRead;
   Function *CsiAfterRead;
@@ -426,15 +429,16 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
   bool Res = false;
 
   DILocation *Loc = I->getDebugLoc();
-  uint64_t LocalId = FED.add(Loc);
-  Value *CsiId = FED.localToGlobalId(LocalId, IRB);
-
   if(IsWrite) {
+    uint64_t LocalId = StoreFED.add(Loc);
+    Value *CsiId = StoreFED.localToGlobalId(LocalId, IRB);
     Res = addLoadStoreInstrumentation(
         Iter, CsiBeforeWrite, CsiAfterWrite, CsiId, AddrType, Addr, NumBytes, prop);
     NumInstrumentedWrites++;
 
   } else { // is read
+    uint64_t LocalId = LoadFED.add(Loc);
+    Value *CsiId = LoadFED.localToGlobalId(LocalId, IRB);
     Res = addLoadStoreInstrumentation(
         Iter, CsiBeforeRead, CsiAfterRead, CsiId, AddrType, Addr, NumBytes, prop);
     NumInstrumentedReads++;
@@ -534,6 +538,8 @@ void CodeSpectatorInterface::initializeFEDTables(Module &M) {
   FunctionExitFED = FrontEndDataTable(M, CsiFunctionExitBaseIdName);
   BasicBlockFED = FrontEndDataTable(M, CsiBasicBlockBaseIdName);
   CallsiteFED = FrontEndDataTable(M, CsiCallsiteBaseIdName);
+  LoadFED = FrontEndDataTable(M, CsiLoadBaseIdName);
+  StoreFED = FrontEndDataTable(M, CsiStoreBaseIdName);
 }
 
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
@@ -573,7 +579,13 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       BasicBlockFED.getPointerType(C),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
-      CallsiteFED.getPointerType(C)
+      CallsiteFED.getPointerType(C),
+      IRB.getInt64Ty(),
+      PointerType::get(IRB.getInt64Ty(), 0),
+      LoadFED.getPointerType(C),
+      IRB.getInt64Ty(),
+      PointerType::get(IRB.getInt64Ty(), 0),
+      StoreFED.getPointerType(C)
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
@@ -598,7 +610,9 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
     *FunctionFEDPtr = FunctionFED.insertIntoModule(M),
     *FunctionExitFEDPtr = FunctionExitFED.insertIntoModule(M),
     *BasicBlockFEDPtr = BasicBlockFED.insertIntoModule(M),
-    *CallsiteFEDPtr = CallsiteFED.insertIntoModule(M);
+    *CallsiteFEDPtr = CallsiteFED.insertIntoModule(M),
+    *LoadFEDPtr = LoadFED.insertIntoModule(M),
+    *StoreFEDPtr = StoreFED.insertIntoModule(M);
 
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
@@ -617,7 +631,13 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       BasicBlockFEDPtr,
       IRB.getInt64(CallsiteFED.size()),
       CallsiteFED.baseId(),
-      CallsiteFEDPtr
+      CallsiteFEDPtr,
+      IRB.getInt64(LoadFED.size()),
+      LoadFED.baseId(),
+      LoadFEDPtr,
+      IRB.getInt64(StoreFED.size()),
+      StoreFED.baseId(),
+      StoreFEDPtr
   });
 
   // Add the constructor to the global list
