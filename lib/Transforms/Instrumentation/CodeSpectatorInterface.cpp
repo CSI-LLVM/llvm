@@ -47,6 +47,7 @@ const char *const CsiLoadBaseIdName = "__csi_unit_load_base_id";
 const char *const CsiStoreBaseIdName = "__csi_unit_store_base_id";
 const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
+const char *const CsiInitRelTablesName = "__csi_init_rel_tables";
 
 const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
@@ -207,6 +208,8 @@ private:
   void initializeBasicBlockCallbacks(Module &M);
   void initializeCallsiteCallbacks(Module &M);
   void initializeFEDTables(Module &M);
+  void initializeRelTableFunctions(Module &M);
+
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
 
@@ -222,6 +225,8 @@ private:
                                    Value *Addr,
                                    int NumBytes,
                                    csi_acc_prop_t prop);
+
+  FunctionType *getInitRelTableFunctionType(LLVMContext &C);
   // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(BasicBlock::iterator I);
   void instrumentCallsite(CallSite &CS);
@@ -246,6 +251,8 @@ private:
   Function *CsiBBEntry, *CsiBBExit;
   Function *MemmoveFn, *MemcpyFn, *MemsetFn;
   Function *CsiBeforeCallsite;
+
+  Function *InitRelTables;
 
   Type *IntptrTy;
 
@@ -349,6 +356,31 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
   MemsetFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memset", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
                             IRB.getInt32Ty(), IntptrTy, nullptr));
+}
+
+FunctionType *CodeSpectatorInterface::getInitRelTableFunctionType(LLVMContext &C) {
+  // This must match the definition of __csi_init_rel_tables_t in csirt.c.
+  // typedef void (*__csi_init_rel_tables_t)(rel_table *rel_bb_to_func, rel_range_table *rel_func_to_bb);
+
+  // Must match definitions in csirt.c
+  StructType *RangeTy, // range_t
+    *RelTableTy, // rel_table
+    *RelRangeTableTy; // rel_range_table
+  RangeTy = StructType::get(IntegerType::get(C, 64),
+                            IntegerType::get(C, 64), nullptr);
+  RelTableTy = StructType::get(IntegerType::get(C, 64),
+                               PointerType::get(IntegerType::get(C, 64), 0),
+                               nullptr);
+  RelRangeTableTy = StructType::get(IntegerType::get(C, 64),
+                                    PointerType::get(RangeTy, 0),
+                                    nullptr);
+
+  SmallVector<Type *, 4> ArgTypes({
+      PointerType::get(RelTableTy, 0),
+      PointerType::get(RelRangeTableTy, 0)
+  });
+
+  return FunctionType::get(Type::getVoidTy(C), ArgTypes, false);
 }
 
 int CodeSpectatorInterface::getNumBytesAccessed(Value *Addr,
@@ -540,12 +572,20 @@ void CodeSpectatorInterface::initializeFEDTables(Module &M) {
   StoreFED = FrontEndDataTable(M, CsiStoreBaseIdName);
 }
 
+void CodeSpectatorInterface::initializeRelTableFunctions(Module &M) {
+  FunctionType *FnType = getInitRelTableFunctionType(M.getContext());
+  InitRelTables = checkCsiInterfaceFunction(M.getOrInsertFunction(CsiInitRelTablesName, FnType));
+  assert(InitRelTables);
+  InitRelTables->setLinkage(GlobalValue::InternalLinkage);
+}
+
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
   initializeFEDTables(M);
   initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
   initializeBasicBlockCallbacks(M);
   initializeCallsiteCallbacks(M);
+  initializeRelTableFunctions(M);
 
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
 }
@@ -580,7 +620,10 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       LoadFED.getPointerType(C),
       IRB.getInt64Ty(),
       PointerType::get(IRB.getInt64Ty(), 0),
-      StoreFED.getPointerType(C)
+      StoreFED.getPointerType(C),
+      IRB.getInt64Ty(),
+      IRB.getInt64Ty(),
+      InitRelTables->getType()
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
@@ -599,6 +642,12 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
     }
     assert(GV);
     IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
+  }
+
+  // Generate the init rel tables function
+  {
+    BasicBlock *EntryBB = BasicBlock::Create(C, "", InitRelTables);
+    IRBuilder<> IRB(ReturnInst::Create(C, EntryBB));
   }
 
   Constant *FunctionFEDPtr = FunctionFED.insertIntoModule(M),
@@ -628,7 +677,10 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       LoadFEDPtr,
       IRB.getInt64(StoreFED.size()),
       StoreFED.baseId(),
-      StoreFEDPtr
+      StoreFEDPtr,
+      IRB.getInt64(0),
+      IRB.getInt64(0),
+      InitRelTables
   });
 
   // Add the constructor to the global list
