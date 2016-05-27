@@ -252,6 +252,29 @@ public:
     assert(rangeRelations.find(V) != rangeRelations.end() && "Relation does not exist.");
     return rangeRelations[V];
   }
+
+  // Return the range_t LLVM type
+  static StructType *getRangeType(LLVMContext &C) {
+    return StructType::get(IntegerType::get(C, 64),
+                           IntegerType::get(C, 64),
+                           nullptr);
+
+  }
+
+  // Return the CSIRT rel_table LLVM type
+  static StructType *getTableType(LLVMContext &C) {
+    return StructType::get(IntegerType::get(C, 64),
+                           PointerType::get(IntegerType::get(C, 64), 0),
+                           nullptr);
+  }
+
+  // Return the CSIRT rel_range_table LLVM type
+  static StructType *getRangeTableType(LLVMContext &C) {
+    return StructType::get(IntegerType::get(C, 64),
+                           PointerType::get(getRangeType(C), 0),
+                           nullptr);
+  }
+
 private:
   std::map<Value *, uint64_t> relations;
   std::map<Value *, Range> rangeRelations;
@@ -441,23 +464,9 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
 FunctionType *CodeSpectatorInterface::getInitRelTableFunctionType(LLVMContext &C) {
   // This must match the definition of __csi_init_rel_tables_t in csirt.c.
   // typedef void (*__csi_init_rel_tables_t)(rel_table *rel_bb_to_func, rel_range_table *rel_func_to_bb);
-
-  // Must match definitions in csirt.c
-  StructType *RangeTy, // range_t
-    *RelTableTy, // rel_table
-    *RelRangeTableTy; // rel_range_table
-  RangeTy = StructType::get(IntegerType::get(C, 64),
-                            IntegerType::get(C, 64), nullptr);
-  RelTableTy = StructType::get(IntegerType::get(C, 64),
-                               PointerType::get(IntegerType::get(C, 64), 0),
-                               nullptr);
-  RelRangeTableTy = StructType::get(IntegerType::get(C, 64),
-                                    PointerType::get(RangeTy, 0),
-                                    nullptr);
-
-  SmallVector<Type *, 4> ArgTypes({
-      PointerType::get(RelTableTy, 0),
-      PointerType::get(RelRangeTableTy, 0)
+  SmallVector<Type *, 2> ArgTypes({
+      PointerType::get(RelationTable::getTableType(C), 0),
+      PointerType::get(RelationTable::getRangeTableType(C), 0)
   });
 
   return FunctionType::get(Type::getVoidTy(C), ArgTypes, false);
