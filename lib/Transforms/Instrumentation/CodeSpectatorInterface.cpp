@@ -703,8 +703,7 @@ void CodeSpectatorInterface::generateInitRelationTables(Module &M) {
     Value *GlobalStartBBId = IRB.CreateAdd(BBBaseId, IRB.getInt64(firstBBId)),
       *GlobalLastBBId = IRB.CreateAdd(BBBaseId, IRB.getInt64(lastBBId));
 
-    // RangeTy = StructType::get(IntegerType::get(C, 64),
-    //                           IntegerType::get(C, 64), nullptr);
+    // Create the range_t instance.
     SmallVector<Constant *, 2> Undefs({UndefValue::get(IntegerType::get(C, 64)), UndefValue::get(IntegerType::get(C, 64))});
     Constant *RangeStruct = ConstantStruct::getAnon(Undefs);
     Value *GlobalBBRange = IRB.CreateInsertValue(RangeStruct, GlobalStartBBId, {0});
