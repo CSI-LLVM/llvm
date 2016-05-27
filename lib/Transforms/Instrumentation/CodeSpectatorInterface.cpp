@@ -53,6 +53,14 @@ const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
 const int CsiUnitCtorPriority = 65535;
 
+DILocation *getFirstDebugLoc(BasicBlock &BB) {
+  for (Instruction &Inst : BB)
+    if (DILocation *Loc = Inst.getDebugLoc())
+      return Loc;
+
+  return nullptr;
+}
+
 class FrontEndDataTable {
 public:
   FrontEndDataTable() {}
@@ -70,20 +78,27 @@ public:
     return idSpace.base();
   }
 
-  uint64_t add(DILocation *Loc) {
-    if (Loc) {
-      return add((int32_t)Loc->getLine(), Loc->getFilename());
-    } else {
-      return add(-1, "");
-    }
+  uint64_t add(Function &F) {
+    uint64_t Id = add(llvm::getDISubprogram(&F));
+    valueToLocalIdMap[&F] = Id;
+    return Id;
   }
 
-  uint64_t add(DISubprogram *Subprog) {
-    if (Subprog) {
-      return add((int32_t)Subprog->getLine(), Subprog->getFilename());
-    } else {
-      return add(-1, "");
-    }
+  uint64_t add(BasicBlock &BB) {
+    uint64_t Id = add(getFirstDebugLoc(BB));
+    valueToLocalIdMap[&BB] = Id;
+    return Id;
+  }
+
+  uint64_t add(Instruction &I) {
+    uint64_t Id = add(I.getDebugLoc());
+    valueToLocalIdMap[&I] = Id;
+    return Id;
+  }
+
+  uint64_t getId(Value *V) {
+      assert(valueToLocalIdMap.find(V) != valueToLocalIdMap.end() && "Value not in ID map.");
+      return valueToLocalIdMap[V];
   }
 
   Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const {
@@ -164,6 +179,7 @@ private:
 
   EntryList entries;
   IdSpace idSpace;
+  std::map<Value *, uint64_t> valueToLocalIdMap;
 
   // Create a struct type to match the "struct fed_entry" defined in csirt.c
   StructType *getEntryStructType(LLVMContext &C) const {
@@ -172,9 +188,25 @@ private:
                            nullptr);
   }
 
+  uint64_t add(DILocation *Loc) {
+    if (Loc) {
+      return add((int32_t)Loc->getLine(), Loc->getFilename());
+    } else {
+      return add(-1, "");
+    }
+  }
+
+  uint64_t add(DISubprogram *Subprog) {
+    if (Subprog) {
+      return add((int32_t)Subprog->getLine(), Subprog->getFilename());
+    } else {
+      return add(-1, "");
+    }
+  }
+
   uint64_t add(int32_t Line, StringRef File) {
     uint64_t Id = idSpace.getNextLocalId();
-    assert(entries.find(id) == entries.end() && "Id already exists in FED table.");
+    assert(entries.find(Id) == entries.end() && "Id already exists in FED table.");
     entries[Id] = { Line, File };
     return Id;
   }
@@ -459,16 +491,15 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
 
   bool Res = false;
 
-  DILocation *Loc = I->getDebugLoc();
   if(IsWrite) {
-    uint64_t LocalId = StoreFED.add(Loc);
+    uint64_t LocalId = StoreFED.add(*I);
     Value *CsiId = StoreFED.localToGlobalId(LocalId, IRB);
     Res = addLoadStoreInstrumentation(
         Iter, CsiBeforeWrite, CsiAfterWrite, CsiId, AddrType, Addr, NumBytes, prop);
     NumInstrumentedWrites++;
 
   } else { // is read
-    uint64_t LocalId = LoadFED.add(Loc);
+    uint64_t LocalId = LoadFED.add(*I);
     Value *CsiId = LoadFED.localToGlobalId(LocalId, IRB);
     Res = addLoadStoreInstrumentation(
         Iter, CsiBeforeRead, CsiAfterRead, CsiId, AddrType, Addr, NumBytes, prop);
@@ -506,18 +537,9 @@ void CodeSpectatorInterface::instrumentMemIntrinsic(BasicBlock::iterator Iter) {
   }
 }
 
-DILocation *getFirstDebugLoc(BasicBlock &BB) {
-  for (Instruction &Inst : BB)
-    if (DILocation *Loc = Inst.getDebugLoc())
-      return Loc;
-
-  return nullptr;
-}
-
 bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   IRBuilder<> IRB(BB.getFirstInsertionPt());
-  DILocation *Loc = getFirstDebugLoc(BB);
-  uint64_t LocalId = BasicBlockFED.add(Loc);
+  uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
 
   IRB.CreateCall(CsiBBEntry, {CsiId});
@@ -538,8 +560,7 @@ void CodeSpectatorInterface::instrumentCallsite(CallSite &CS) {
   }
 
   IRBuilder<> IRB(I);
-  DILocation *Loc = I->getDebugLoc();
-  uint64_t LocalId = CallsiteFED.add(Loc);
+  uint64_t LocalId = CallsiteFED.add(*I);
   Value *CsiId = CallsiteFED.localToGlobalId(LocalId, IRB);
 
   std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
@@ -841,6 +862,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // Note that we do this before function entry so that we put this at the
   // beginning of the basic block, and then the function entry call goes before
   // the call to basic block entry.
+  uint64_t LocalId = FunctionFED.add(F);
   for (BasicBlock &BB : F) {
     Modified |= instrumentBasicBlock(BB);
   }
@@ -848,8 +870,6 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // Instrument function entry/exit points.
   IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
 
-  DISubprogram *Subprog = llvm::getDISubprogram(&F);
-  uint64_t LocalId = FunctionFED.add(Subprog);
   Value *CsiId = FunctionFED.localToGlobalId(LocalId, IRB);
 
   Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
@@ -862,7 +882,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   for (BasicBlock::iterator I : RetVec) {
       Instruction *RetInst = &(*I);
       IRBuilder<> IRBRet(RetInst);
-      uint64_t ExitLocalId = FunctionExitFED.add(Subprog);
+      uint64_t ExitLocalId = FunctionExitFED.add(F);
       Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
       IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, Function, ReturnAddress, FunctionName});
   }
