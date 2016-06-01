@@ -48,6 +48,7 @@ const char *const CsiStoreBaseIdName = "__csi_unit_store_base_id";
 const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 const char *const CsiInitRelTablesName = "__csi_init_rel_tables";
+const char *const CsiInitCallsiteToFunctionName = "__csi_init_callsite_to_function";
 
 const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
@@ -310,6 +311,7 @@ private:
   void initializeFEDTables(Module &M);
   void initializeRelTableFunctions(Module &M);
   void generateInitRelationTables(Module &M);
+  void generateInitCallsiteToFunction(Module &M);
 
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
@@ -355,7 +357,7 @@ private:
   Function *MemmoveFn, *MemcpyFn, *MemsetFn;
   Function *CsiBeforeCallsite;
 
-  Function *InitRelTables;
+  Function *InitRelTables, *InitCallsiteToFunction;
 
   Type *IntptrTy;
 
@@ -657,6 +659,11 @@ void CodeSpectatorInterface::initializeRelTableFunctions(Module &M) {
   InitRelTables = checkCsiInterfaceFunction(M.getOrInsertFunction(CsiInitRelTablesName, FnType));
   assert(InitRelTables);
   InitRelTables->setLinkage(GlobalValue::InternalLinkage);
+
+  FnType = FunctionType::get(Type::getVoidTy(M.getContext()), {}, false);
+  InitCallsiteToFunction = checkCsiInterfaceFunction(M.getOrInsertFunction(CsiInitCallsiteToFunctionName, FnType));
+  assert(InitCallsiteToFunction);
+  InitCallsiteToFunction->setLinkage(GlobalValue::InternalLinkage);
 }
 
 void CodeSpectatorInterface::generateInitRelationTables(Module &M) {
@@ -716,6 +723,24 @@ void CodeSpectatorInterface::generateInitRelationTables(Module &M) {
   }
 }
 
+void CodeSpectatorInterface::generateInitCallsiteToFunction(Module &M) {
+  LLVMContext &C = M.getContext();
+  BasicBlock *EntryBB = BasicBlock::Create(C, "", InitCallsiteToFunction);
+  IRBuilder<> IRB(ReturnInst::Create(C, EntryBB));
+
+  GlobalVariable *Base = FunctionFED.baseId();
+  LoadInst *LI = IRB.CreateLoad(Base);
+  for (const auto &it : FuncOffsetMap) {
+    std::string GVName = CsiFuncIdVariablePrefix + it.first;
+    GlobalVariable *GV = nullptr;
+    if ((GV = M.getGlobalVariable(GVName)) == nullptr) {
+        GV = new GlobalVariable(M, IRB.getInt64Ty(), false, GlobalValue::WeakAnyLinkage, IRB.getInt64(CsiCallsiteUnknownTargetId), GVName);
+    }
+    assert(GV);
+    IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
+  }
+}
+
 void CodeSpectatorInterface::InitializeCsi(Module &M) {
   initializeFEDTables(M);
   initializeFuncCallbacks(M);
@@ -760,7 +785,8 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       StoreFED.getPointerType(C),
       IRB.getInt64Ty(),
       IRB.getInt64Ty(),
-      InitRelTables->getType()
+      InitRelTables->getType(),
+      InitCallsiteToFunction->getType()
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
@@ -769,17 +795,7 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
 
   // Insert __csi_func_id_<f> weak symbols for all defined functions
   // and generate the runtime code that stores to all of them.
-  GlobalVariable *Base = FunctionFED.baseId();
-  LoadInst *LI = IRB.CreateLoad(Base);
-  for (const auto &it : FuncOffsetMap) {
-    std::string GVName = CsiFuncIdVariablePrefix + it.first;
-    GlobalVariable *GV = nullptr;
-    if ((GV = M.getGlobalVariable(GVName)) == nullptr) {
-        GV = new GlobalVariable(M, IRB.getInt64Ty(), false, GlobalValue::WeakAnyLinkage, IRB.getInt64(CsiCallsiteUnknownTargetId), GVName);
-    }
-    assert(GV);
-    IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
-  }
+  generateInitCallsiteToFunction(M);
 
   // Generate the function body to initialize the relation tables.
   generateInitRelationTables(M);
@@ -814,7 +830,8 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
       StoreFEDPtr,
       IRB.getInt64(BasicBlockToFunctionRelTable.size()),
       IRB.getInt64(FunctionToBasicBlocksRelTable.size()),
-      InitRelTables
+      InitRelTables,
+      InitCallsiteToFunction
   });
 
   // Add the constructor to the global list
@@ -937,8 +954,6 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   bool Modified = false;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
-  FuncOffsetMap[F.getName()] = FuncOffsetMap.size();
-
   // Traverse all instructions in a function and insert instrumentation
   // on load & store
   for (BasicBlock &BB : F) {
@@ -976,6 +991,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // beginning of the basic block, and then the function entry call goes before
   // the call to basic block entry.
   uint64_t LocalId = FunctionFED.add(F);
+  FuncOffsetMap[F.getName()] = LocalId;
   for (BasicBlock &BB : F) {
     Modified |= instrumentBasicBlock(BB);
   }
