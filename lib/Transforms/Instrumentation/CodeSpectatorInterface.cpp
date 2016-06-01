@@ -332,7 +332,7 @@ private:
   FunctionType *getInitRelTableFunctionType(LLVMContext &C);
   // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(BasicBlock::iterator I);
-  void instrumentCallsite(CallSite &CS);
+  void instrumentCallsite(BasicBlock::iterator I);
   bool instrumentBasicBlock(BasicBlock &BB);
   bool FunctionCallsFunction(Function *F, Function *G);
   bool ShouldNotInstrumentFunction(Function &F);
@@ -355,7 +355,7 @@ private:
   Function *CsiFuncExit;
   Function *CsiBBEntry, *CsiBBExit;
   Function *MemmoveFn, *MemcpyFn, *MemsetFn;
-  Function *CsiBeforeCallsite;
+  Function *CsiBeforeCallsite, *CsiAfterCallsite;
 
   Function *InitRelTables, *InitCallsiteToFunction;
 
@@ -409,6 +409,8 @@ void CodeSpectatorInterface::initializeCallsiteCallbacks(Module &M) {
   FunctionType *FnType = FunctionType::get(IRB.getVoidTy(), ArgTypes, false);
   CsiBeforeCallsite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_callsite", FnType));
+  CsiAfterCallsite = checkCsiInterfaceFunction(
+      M.getOrInsertFunction("__csi_after_callsite", FnType));
 }
 
 /**
@@ -609,18 +611,19 @@ bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   return true;
 }
 
-void CodeSpectatorInterface::instrumentCallsite(CallSite &CS) {
-  Instruction *I = CS.getInstruction();
-  Module *M = I->getParent()->getParent()->getParent();
+void CodeSpectatorInterface::instrumentCallsite(BasicBlock::iterator Iter) {
+  IRBuilder<> IRB(&(*Iter));
+  CallSite CS(Iter);
+  Instruction *Inst = CS.getInstruction();
+  Module *M = Inst->getParent()->getParent()->getParent();
   Function *Called = CS.getCalledFunction();
 
   if (Called && Called->getName().startswith("llvm.dbg")) {
       return;
   }
 
-  IRBuilder<> IRB(I);
-  uint64_t LocalId = CallsiteFED.add(*I);
-  Value *CsiId = CallsiteFED.localToGlobalId(LocalId, IRB);
+  uint64_t LocalId = CallsiteFED.add(*Inst);
+  Value *CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
 
   std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
   GlobalVariable *FuncIdGV = dyn_cast<GlobalVariable>(M->getOrInsertGlobal(GVName, IRB.getInt64Ty()));
@@ -630,7 +633,11 @@ void CodeSpectatorInterface::instrumentCallsite(CallSite &CS) {
   FuncIdGV->setInitializer(IRB.getInt64(CsiCallsiteUnknownTargetId));
 
   Value *FuncId = IRB.CreateLoad(FuncIdGV);
-  IRB.CreateCall(CsiBeforeCallsite, {CsiId, FuncId});
+  IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId});
+
+  Iter++;
+  IRB.SetInsertPoint(&*Iter);
+  IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId});
 }
 
 bool CodeSpectatorInterface::doInitialization(Module &M) {
@@ -980,8 +987,7 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
     instrumentMemIntrinsic(I);
 
   for (BasicBlock::iterator I : Callsites) {
-    CallSite CS(I);
-    instrumentCallsite(CS);
+    instrumentCallsite(I);
   }
 
   // Instrument basic blocks
