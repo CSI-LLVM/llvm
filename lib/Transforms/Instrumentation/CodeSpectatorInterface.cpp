@@ -387,11 +387,9 @@ ModulePass *llvm::createCodeSpectatorInterfacePass() {
 void CodeSpectatorInterface::initializeFuncCallbacks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   CsiFuncEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt8PtrTy(),
-      IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), nullptr));
+      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), nullptr));
   CsiFuncExit = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_func_exit", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt8PtrTy(),
-      IRB.getInt8PtrTy(), IRB.getInt8PtrTy(), nullptr));
+      "__csi_func_exit", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
 }
 
 void CodeSpectatorInterface::initializeBasicBlockCallbacks(Module &M) {
@@ -1002,21 +1000,15 @@ bool CodeSpectatorInterface::runOnFunction(Function &F) {
   // Instrument function entry/exit points.
   IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
 
-  Value *CsiId = FunctionFED.localToGlobalId(LocalId, IRB);
-
-  Value *Function = ConstantExpr::getBitCast(&F, IRB.getInt8PtrTy());
-  Value *FunctionName = IRB.CreateGlobalStringPtr(F.getName());
-  Value *ReturnAddress = IRB.CreateCall(
-      Intrinsic::getDeclaration(F.getParent(), Intrinsic::returnaddress),
-      IRB.getInt32(0));
-  IRB.CreateCall(CsiFuncEntry, {CsiId, Function, ReturnAddress, FunctionName});
+  Value *FuncId = FunctionFED.localToGlobalId(LocalId, IRB);
+  IRB.CreateCall(CsiFuncEntry, {FuncId});
 
   for (BasicBlock::iterator I : RetVec) {
       Instruction *RetInst = &(*I);
       IRBuilder<> IRBRet(RetInst);
       uint64_t ExitLocalId = FunctionExitFED.add(F);
       Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
-      IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, Function, ReturnAddress, FunctionName});
+      IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId});
   }
   Modified = true;
 
