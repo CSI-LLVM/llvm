@@ -49,6 +49,7 @@ const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 const char *const CsiInitRelTablesName = "__csi_init_rel_tables";
 const char *const CsiInitCallsiteToFunctionName = "__csi_init_callsite_to_function";
+const char *const CsiUnitFedTableArrayName = "__csi_unit_fed_tables";
 
 const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
@@ -98,15 +99,15 @@ public:
   }
 
   uint64_t getId(Value *V) {
-      assert(valueToLocalIdMap.find(V) != valueToLocalIdMap.end() && "Value not in ID map.");
-      return valueToLocalIdMap[V];
+    assert(valueToLocalIdMap.find(V) != valueToLocalIdMap.end() && "Value not in ID map.");
+    return valueToLocalIdMap[V];
   }
 
   Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const {
     return idSpace.localToGlobalId(LocalId, IRB);
   }
 
-  PointerType *getPointerType(LLVMContext &C) const {
+  static PointerType *getPointerType(LLVMContext &C) {
     return PointerType::get(getEntryStructType(C), 0);
   }
 
@@ -182,8 +183,8 @@ private:
   IdSpace idSpace;
   std::map<Value *, uint64_t> valueToLocalIdMap;
 
-  // Create a struct type to match the "struct fed_entry" defined in csirt.c
-  StructType *getEntryStructType(LLVMContext &C) const {
+  // Create a struct type to match the "struct source_loc_t" defined in csirt.c
+  static StructType *getEntryStructType(LLVMContext &C) {
     return StructType::get(IntegerType::get(C, 32),
                            PointerType::get(IntegerType::get(C, 8), 0),
                            nullptr);
@@ -757,6 +758,22 @@ void CodeSpectatorInterface::InitializeCsi(Module &M) {
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
 }
 
+// Create a struct type to match the unit_fed_entry_t type in csirt.c.
+StructType *getUnitFedTableType(LLVMContext &C, PointerType *EntryPointerType) {
+  return StructType::get(IntegerType::get(C, 64),
+                         PointerType::get(IntegerType::get(C, 64), 0),
+                         EntryPointerType,
+                         nullptr);
+}
+
+Constant *fedTableToUnitFedTable(Module &M,
+                                 StructType *UnitFedTableType,
+                                 FrontEndDataTable &FedTable) {
+  Constant *NumEntries = ConstantInt::get(IntegerType::get(M.getContext(), 64), FedTable.size());
+  Constant *InsertedTable = FedTable.insertIntoModule(M);
+  return ConstantStruct::get(UnitFedTableType, NumEntries, FedTable.baseId(), InsertedTable, nullptr);
+}
+
 void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   LLVMContext &C = M.getContext();
 
@@ -767,27 +784,12 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   BasicBlock *CtorBB = BasicBlock::Create(C, "", Ctor);
   IRBuilder<> IRB(ReturnInst::Create(C, CtorBB));
 
+  StructType *UnitFedTableType = getUnitFedTableType(C, FrontEndDataTable::getPointerType(C));
+
   // Lookup __csirt_unit_init
   SmallVector<Type *, 4> InitArgTypes({
       IRB.getInt8PtrTy(),
-      IRB.getInt64Ty(),
-      PointerType::get(IRB.getInt64Ty(), 0),
-      FunctionFED.getPointerType(C),
-      IRB.getInt64Ty(),
-      PointerType::get(IRB.getInt64Ty(), 0),
-      FunctionExitFED.getPointerType(C),
-      IRB.getInt64Ty(),
-      PointerType::get(IRB.getInt64Ty(), 0),
-      BasicBlockFED.getPointerType(C),
-      IRB.getInt64Ty(),
-      PointerType::get(IRB.getInt64Ty(), 0),
-      CallsiteFED.getPointerType(C),
-      IRB.getInt64Ty(),
-      PointerType::get(IRB.getInt64Ty(), 0),
-      LoadFED.getPointerType(C),
-      IRB.getInt64Ty(),
-      PointerType::get(IRB.getInt64Ty(), 0),
-      StoreFED.getPointerType(C),
+      PointerType::get(UnitFedTableType, 0),
       IRB.getInt64Ty(),
       IRB.getInt64Ty(),
       InitRelTables->getType(),
@@ -805,34 +807,26 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   // Generate the function body to initialize the relation tables.
   generateInitRelationTables(M);
 
-  Constant *FunctionFEDPtr = FunctionFED.insertIntoModule(M),
-    *FunctionExitFEDPtr = FunctionExitFED.insertIntoModule(M),
-    *BasicBlockFEDPtr = BasicBlockFED.insertIntoModule(M),
-    *CallsiteFEDPtr = CallsiteFED.insertIntoModule(M),
-    *LoadFEDPtr = LoadFED.insertIntoModule(M),
-    *StoreFEDPtr = StoreFED.insertIntoModule(M);
+  SmallVector<Constant *, 4> UnitFedTables({
+      fedTableToUnitFedTable(M, UnitFedTableType, BasicBlockFED),
+      fedTableToUnitFedTable(M, UnitFedTableType, FunctionFED),
+      fedTableToUnitFedTable(M, UnitFedTableType, FunctionExitFED),
+      fedTableToUnitFedTable(M, UnitFedTableType, CallsiteFED),
+      fedTableToUnitFedTable(M, UnitFedTableType, LoadFED),
+      fedTableToUnitFedTable(M, UnitFedTableType, StoreFED),
+  });
+
+  ArrayType *UnitFedTableArrayType = ArrayType::get(UnitFedTableType, UnitFedTables.size());
+  Constant *Table = ConstantArray::get(UnitFedTableArrayType, UnitFedTables);
+  GlobalVariable *GV = new GlobalVariable(M, UnitFedTableArrayType, false, GlobalValue::InternalLinkage, Table, CsiUnitFedTableArrayName);
+
+  Constant *Zero = ConstantInt::get(IRB.getInt32Ty(), 0);
+  Value *GepArgs[] = {Zero, Zero};
 
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
       IRB.CreateGlobalStringPtr(M.getName()),
-      IRB.getInt64(FunctionFED.size()),
-      FunctionFED.baseId(),
-      FunctionFEDPtr,
-      IRB.getInt64(FunctionExitFED.size()),
-      FunctionExitFED.baseId(),
-      FunctionExitFEDPtr,
-      IRB.getInt64(BasicBlockFED.size()),
-      BasicBlockFED.baseId(),
-      BasicBlockFEDPtr,
-      IRB.getInt64(CallsiteFED.size()),
-      CallsiteFED.baseId(),
-      CallsiteFEDPtr,
-      IRB.getInt64(LoadFED.size()),
-      LoadFED.baseId(),
-      LoadFEDPtr,
-      IRB.getInt64(StoreFED.size()),
-      StoreFED.baseId(),
-      StoreFEDPtr,
+      ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs),
       IRB.getInt64(BasicBlockToFunctionRelTable.size()),
       IRB.getInt64(FunctionToBasicBlocksRelTable.size()),
       InitRelTables,
