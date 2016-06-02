@@ -408,9 +408,9 @@ void CodeSpectatorInterface::initializeCallsiteCallbacks(Module &M) {
   SmallVector<Type *, 4> ArgTypes({IRB.getInt64Ty(), IRB.getInt64Ty()});
   FunctionType *FnType = FunctionType::get(IRB.getVoidTy(), ArgTypes, false);
   CsiBeforeCallsite = checkCsiInterfaceFunction(
-      M.getOrInsertFunction("__csi_before_callsite", FnType));
+      M.getOrInsertFunction("__csi_before_call", FnType));
   CsiAfterCallsite = checkCsiInterfaceFunction(
-      M.getOrInsertFunction("__csi_after_callsite", FnType));
+      M.getOrInsertFunction("__csi_after_call", FnType));
 }
 
 /**
