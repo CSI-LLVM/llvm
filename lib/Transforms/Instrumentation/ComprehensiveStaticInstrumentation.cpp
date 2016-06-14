@@ -207,10 +207,10 @@ private:
 
   int getNumBytesAccessed(Value *Addr, const DataLayout &DL);
   void computeAttributesForMemoryAccesses(
-      SmallVectorImpl<std::pair<BasicBlock::iterator, uint64_t>> &Accesses,
-      SmallVectorImpl<BasicBlock::iterator> &LocalAccesses);
+      SmallVectorImpl<std::pair<Instruction *, uint64_t>> &Accesses,
+      SmallVectorImpl<Instruction *> &LocalAccesses);
 
-  void addLoadStoreInstrumentation(BasicBlock::iterator Iter,
+  void addLoadStoreInstrumentation(Instruction *I,
                                    Function *BeforeFn,
                                    Function *AfterFn,
                                    Value *CsiId,
@@ -219,9 +219,9 @@ private:
                                    int NumBytes,
                                    uint64_t Prop);
 
-  void instrumentLoadOrStore(BasicBlock::iterator Iter, uint64_t Prop, const DataLayout &DL);
-  void instrumentMemIntrinsic(BasicBlock::iterator I);
-  void instrumentCallsite(BasicBlock::iterator I);
+  void instrumentLoadOrStore(Instruction *I, uint64_t Prop, const DataLayout &DL);
+  void instrumentMemIntrinsic(Instruction *I);
+  void instrumentCallsite(Instruction *I);
   void instrumentBasicBlock(BasicBlock &BB);
   void instrumentFunction(Function &F);
 
@@ -327,7 +327,7 @@ int ComprehensiveStaticInstrumentation::getNumBytesAccessed(Value *Addr,
   return TypeSize / 8;
 }
 
-void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock::iterator Iter,
+void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(Instruction *I,
                                                          Function *BeforeFn,
                                                          Function *AfterFn,
                                                          Value *CsiId,
@@ -335,10 +335,11 @@ void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock:
                                                          Value *Addr,
                                                          int NumBytes,
                                                          uint64_t Prop) {
-  IRBuilder<> IRB(&*Iter);
+  IRBuilder<> IRB(I);
   IRB.CreateCall(BeforeFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
        IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
 
+  BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
 
@@ -346,10 +347,9 @@ void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock:
        IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
 }
 
-void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::iterator Iter,
+void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(Instruction *I,
                                                    uint64_t Prop,
                                                    const DataLayout &DL) {
-  Instruction *I = &*Iter;
   IRBuilder<> IRB(I);
   bool IsWrite = isa<StoreInst>(I);
   Value *Addr = IsWrite ?
@@ -365,12 +365,12 @@ void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::itera
     uint64_t LocalId = StoreFED.add(*I);
     Value *CsiId = StoreFED.localToGlobalId(LocalId, IRB);
     addLoadStoreInstrumentation(
-        Iter, CsiBeforeWrite, CsiAfterWrite, CsiId, AddrType, Addr, NumBytes, Prop);
+        I, CsiBeforeWrite, CsiAfterWrite, CsiId, AddrType, Addr, NumBytes, Prop);
   } else { // is read
     uint64_t LocalId = LoadFED.add(*I);
     Value *CsiId = LoadFED.localToGlobalId(LocalId, IRB);
     addLoadStoreInstrumentation(
-        Iter, CsiBeforeRead, CsiAfterRead, CsiId, AddrType, Addr, NumBytes, Prop);
+        I, CsiBeforeRead, CsiAfterRead, CsiId, AddrType, Addr, NumBytes, Prop);
   }
 }
 
@@ -382,8 +382,7 @@ void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::itera
 // Since our pass runs after everyone else, the calls should not be
 // replaced back with intrinsics. If that becomes wrong at some point,
 // we will need to call e.g. __csi_memset to avoid the intrinsics.
-void ComprehensiveStaticInstrumentation::instrumentMemIntrinsic(BasicBlock::iterator Iter) {
-  Instruction *I = &(*Iter);
+void ComprehensiveStaticInstrumentation::instrumentMemIntrinsic(Instruction *I) {
   IRBuilder<> IRB(I);
   if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
     IRB.CreateCall(
@@ -414,9 +413,9 @@ void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   IRB.CreateCall(CsiBBExit, {CsiId});
 }
 
-void ComprehensiveStaticInstrumentation::instrumentCallsite(BasicBlock::iterator Iter) {
-  IRBuilder<> IRB(&*Iter);
-  CallSite CS(&*Iter);
+void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
+  IRBuilder<> IRB(I);
+  CallSite CS(I);
   Instruction *Inst = CS.getInstruction();
   Module *M = Inst->getParent()->getParent()->getParent();
   Function *Called = CS.getCalledFunction();
@@ -438,6 +437,7 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(BasicBlock::iterator
   Value *FuncId = IRB.CreateLoad(FuncIdGV);
   IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId});
 
+  BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
   IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId});
@@ -591,23 +591,22 @@ bool ComprehensiveStaticInstrumentation::shouldNotInstrumentFunction(Function &F
 }
 
 void ComprehensiveStaticInstrumentation::computeAttributesForMemoryAccesses(
-    SmallVectorImpl<std::pair<BasicBlock::iterator, uint64_t>> &MemoryAccesses,
-    SmallVectorImpl<BasicBlock::iterator> &LocalAccesses) {
+    SmallVectorImpl<std::pair<Instruction *, uint64_t>> &MemoryAccesses,
+    SmallVectorImpl<Instruction *> &LocalAccesses) {
   SmallSet<Value*, 8> WriteTargets;
 
-  for (SmallVectorImpl<BasicBlock::iterator>::reverse_iterator It = LocalAccesses.rbegin(),
+  for (SmallVectorImpl<Instruction *>::reverse_iterator It = LocalAccesses.rbegin(),
       E = LocalAccesses.rend(); It != E; ++It) {
-    BasicBlock::iterator II = *It;
-    Instruction *I = &(*II);
+    Instruction *I = *It;
     if (StoreInst *Store = dyn_cast<StoreInst>(I)) {
       WriteTargets.insert(Store->getPointerOperand());
-      MemoryAccesses.push_back(std::make_pair(II, 0));
+      MemoryAccesses.push_back(std::make_pair(I, 0));
     } else {
       LoadInst *Load = cast<LoadInst>(I);
       Value *Addr = Load->getPointerOperand();
       bool HasBeenSeen = WriteTargets.count(Addr) > 0;
       uint64_t Prop = HasBeenSeen ? 1 : 0;
-      MemoryAccesses.push_back(std::make_pair(II, Prop));
+      MemoryAccesses.push_back(std::make_pair(I, Prop));
     }
   }
   LocalAccesses.clear();
@@ -631,27 +630,26 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
     return;
   }
 
-  SmallVector<std::pair<BasicBlock::iterator, uint64_t>, 8> MemoryAccesses;
-  SmallVector<BasicBlock::iterator, 8> LocalMemoryAccesses;
+  SmallVector<std::pair<Instruction *, uint64_t>, 8> MemoryAccesses;
+  SmallVector<Instruction *, 8> LocalMemoryAccesses;
 
-  SmallVector<BasicBlock::iterator, 8> RetVec;
-  SmallVector<BasicBlock::iterator, 8> MemIntrinsics;
-  SmallVector<BasicBlock::iterator, 8> Callsites;
+  SmallVector<Instruction *, 8> RetVec;
+  SmallVector<Instruction *, 8> MemIntrinsics;
+  SmallVector<Instruction *, 8> Callsites;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   // Traverse all instructions in a function and insert instrumentation
   // on load & store
   for (BasicBlock &BB : F) {
     for (Instruction &I : BB) {
-      BasicBlock::iterator Iter(I);
       if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
-        LocalMemoryAccesses.push_back(Iter);
+        LocalMemoryAccesses.push_back(&I);
       } else if (isa<ReturnInst>(I)) {
-        RetVec.push_back(Iter);
+        RetVec.push_back(&I);
       } else if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
-        Callsites.push_back(Iter);
+        Callsites.push_back(&I);
         if (isa<MemIntrinsic>(I)) {
-          MemIntrinsics.push_back(Iter);
+          MemIntrinsics.push_back(&I);
         }
         computeAttributesForMemoryAccesses(MemoryAccesses, LocalMemoryAccesses);
       }
@@ -661,15 +659,15 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
 
   // Do this work in a separate loop after copying the iterators so that we
   // aren't modifying the list as we're iterating.
-  for (std::pair<BasicBlock::iterator, uint64_t> p : MemoryAccesses) {
+  for (std::pair<Instruction *, uint64_t> p : MemoryAccesses) {
     instrumentLoadOrStore(p.first, p.second, DL);
   }
 
-  for (BasicBlock::iterator I : MemIntrinsics) {
+  for (Instruction *I : MemIntrinsics) {
     instrumentMemIntrinsic(I);
   }
 
-  for (BasicBlock::iterator I : Callsites) {
+  for (Instruction *I : Callsites) {
     instrumentCallsite(I);
   }
 
@@ -689,9 +687,8 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   Value *FuncId = FunctionFED.localToGlobalId(LocalId, IRB);
   IRB.CreateCall(CsiFuncEntry, {FuncId});
 
-  for (BasicBlock::iterator I : RetVec) {
-      Instruction *RetInst = &(*I);
-      IRBuilder<> IRBRet(RetInst);
+  for (Instruction *I : RetVec) {
+      IRBuilder<> IRBRet(I);
       uint64_t ExitLocalId = FunctionExitFED.add(F);
       Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
       IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId});
