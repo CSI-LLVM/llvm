@@ -30,6 +30,8 @@ const int64_t CsiCallsiteUnknownTargetId = -1;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
 const int CsiUnitCtorPriority = 65535;
 
+/// Return the first DILocation in the given basic block, or nullptr
+/// if none exists.
 DILocation *getFirstDebugLoc(BasicBlock &BB) {
   for (Instruction &Inst : BB)
     if (DILocation *Loc = Inst.getDebugLoc())
@@ -38,6 +40,10 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
   return nullptr;
 }
 
+/// Maintains a mapping from CSI ID to front-end data for that ID.
+///
+/// The front-end data currently is the source location that a given
+/// CSI ID corresponds to.
 class FrontEndDataTable {
 public:
   FrontEndDataTable() {}
@@ -49,48 +55,72 @@ public:
     idSpace = IdSpace(GV);
   }
 
-  uint64_t size() const { return entries.size(); }
+  /// The number of entries in this FED table
+  uint64_t size() const {
+    return entries.size();
+  }
 
+  /// The GlobalVariable holding the base ID for this FED table.
   GlobalVariable *baseId() const {
     return idSpace.base();
   }
 
+  /// Add the given Function to this FED table.
+  /// \returns The local ID of the Function.
   uint64_t add(Function &F) {
     uint64_t Id = add(F.getSubprogram());
     valueToLocalIdMap[&F] = Id;
     return Id;
   }
 
+  /// Add the given BasicBlock to this FED table.
+  /// \returns The local ID of the BasicBlock.
   uint64_t add(BasicBlock &BB) {
     uint64_t Id = add(getFirstDebugLoc(BB));
     valueToLocalIdMap[&BB] = Id;
     return Id;
   }
 
+  /// Add the given Instruction to this FED table.
+  /// \returns The local ID of the Instruction.
   uint64_t add(Instruction &I) {
     uint64_t Id = add(I.getDebugLoc());
     valueToLocalIdMap[&I] = Id;
     return Id;
   }
 
+  /// Get the local ID of the given Value.
   uint64_t getId(Value *V) {
     assert(valueToLocalIdMap.find(V) != valueToLocalIdMap.end() && "Value not in ID map.");
     return valueToLocalIdMap[V];
   }
 
+  /// Converts a local to global ID conversion.
+  ///
+  /// This is done by using the given IRBuilder to insert a load to
+  /// the base ID global variable followed by an add of the base value
+  /// and the local ID.
+  ///
+  /// \returns A Value holding the global ID corresponding to the
+  /// given local ID.
   Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const {
     return idSpace.localToGlobalId(LocalId, IRB);
   }
 
+  /// Get the Type for a pointer to a FED table entry.
   static PointerType *getPointerType(LLVMContext &C) {
     return PointerType::get(getEntryStructType(C), 0);
   }
 
+  /// Insert this FED table into the given Module.
+  ///
+  /// The FED table is constructed as a ConstantArray indexed by local IDs.
+  /// The runtime is responsible for performing the mapping that allows the table
+  /// to be indexed by global ID.
   Constant *insertIntoModule(Module &M) const {
     LLVMContext &C = M.getContext();
     StructType *FedType = getEntryStructType(C);
     IntegerType *Int32Ty = IntegerType::get(C, 32);
-
     Constant *Zero = ConstantInt::get(Int32Ty, 0);
     Value *GepArgs[] = {Zero, Zero};
 
