@@ -38,7 +38,7 @@ const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 const char *const CsiUnitFedTableArrayName = "__csi_unit_fed_tables";
 
-const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
+const int64_t CsiCallsiteUnknownTargetId = -1;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
 const int CsiUnitCtorPriority = 65535;
 
