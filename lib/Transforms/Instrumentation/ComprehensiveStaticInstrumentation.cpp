@@ -131,6 +131,8 @@ private:
   uint64_t add(int32_t Line, StringRef File);
 };
 
+/// The Comprehensive Static Instrumentation pass.
+/// Inserts calls to user-defined hooks at predefined points in the IR.
 struct ComprehensiveStaticInstrumentation : public ModulePass {
   static char ID;
 
@@ -140,35 +142,48 @@ struct ComprehensiveStaticInstrumentation : public ModulePass {
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
 private:
+  /// Initialize llvm::Functions for the CSI hooks.
+  /// @{
   void initializeLoadStoreHooks(Module &M);
   void initializeFuncHooks(Module &M);
   void initializeBasicBlockHooks(Module &M);
   void initializeCallsiteHooks(Module &M);
+  /// @}
+
+  /// Initialize the front-end data table structures.
   void initializeFEDTables(Module &M);
+
+  /// Generate a function that stores global function IDs into a set
+  /// of externally-visible global variables.
   void generateInitCallsiteToFunction(Module &M);
 
+  /// Get the number of bytes accessed via the given address.
   int getNumBytesAccessed(Value *Addr, const DataLayout &DL);
-  void computeAttributesForMemoryAccesses(
+
+  /// Compute CSI properties on the given ordered list of loads and stores.
+  void computeLoadAndStoreProperties(
       SmallVectorImpl<std::pair<Instruction *, uint64_t>> &Accesses,
       SmallVectorImpl<Instruction *> &LocalAccesses);
 
-  void addLoadStoreInstrumentation(Instruction *I,
-                                   Function *BeforeFn,
-                                   Function *AfterFn,
-                                   Value *CsiId,
-                                   Type *AddrType,
-                                   Value *Addr,
-                                   int NumBytes,
-                                   uint64_t Prop);
-
+  /// Insert calls to the instrumentation hooks.
+  /// @{
+  void addLoadStoreInstrumentation(Instruction *I, Function *BeforeFn,
+                                   Function *AfterFn, Value *CsiId,
+                                   Type *AddrType, Value *Addr,
+                                   int NumBytes, uint64_t Prop);
   void instrumentLoadOrStore(Instruction *I, uint64_t Prop, const DataLayout &DL);
   void instrumentMemIntrinsic(Instruction *I);
   void instrumentCallsite(Instruction *I);
   void instrumentBasicBlock(BasicBlock &BB);
   void instrumentFunction(Function &F);
+  /// @}
 
+  /// Return true if the given function should not be instrumented.
   bool shouldNotInstrumentFunction(Function &F);
+
+  /// Initialize the CSI pass.
   void initializeCsi(Module &M);
+  /// Finalize the CSI pass.
   void finalizeCsi(Module &M);
 
   FrontEndDataTable FunctionFED, FunctionExitFED, BasicBlockFED,
@@ -403,13 +418,12 @@ void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(Instruction *I,
   Value *Addr = IsWrite ?
       cast<StoreInst>(I)->getPointerOperand()
       : cast<LoadInst>(I)->getPointerOperand();
-
   int NumBytes = getNumBytesAccessed(Addr, DL);
   Type *AddrType = IRB.getInt8PtrTy();
 
   if (NumBytes == -1) return; // size that we don't recognize
 
-  if(IsWrite) {
+  if (IsWrite) {
     uint64_t LocalId = StoreFED.add(*I);
     Value *CsiId = StoreFED.localToGlobalId(LocalId, IRB);
     addLoadStoreInstrumentation(
@@ -507,6 +521,9 @@ void ComprehensiveStaticInstrumentation::generateInitCallsiteToFunction(Module &
 
   GlobalVariable *Base = FunctionFED.baseId();
   LoadInst *LI = IRB.CreateLoad(Base);
+  // Traverse the map of function name -> function local id. Generate
+  // a store of each function's global ID to the corresponding weak
+  // global variable.
   for (const auto &it : FuncOffsetMap) {
     std::string GVName = CsiFuncIdVariablePrefix + it.first;
     GlobalVariable *GV = nullptr;
@@ -638,7 +655,7 @@ bool ComprehensiveStaticInstrumentation::shouldNotInstrumentFunction(Function &F
     return false;
 }
 
-void ComprehensiveStaticInstrumentation::computeAttributesForMemoryAccesses(
+void ComprehensiveStaticInstrumentation::computeLoadAndStoreProperties(
     SmallVectorImpl<std::pair<Instruction *, uint64_t>> &MemoryAccesses,
     SmallVectorImpl<Instruction *> &LocalAccesses) {
   SmallSet<Value*, 8> WriteTargets;
@@ -699,10 +716,10 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
         if (isa<MemIntrinsic>(I)) {
           MemIntrinsics.push_back(&I);
         }
-        computeAttributesForMemoryAccesses(MemoryAccesses, LocalMemoryAccesses);
+        computeLoadAndStoreProperties(MemoryAccesses, LocalMemoryAccesses);
       }
     }
-    computeAttributesForMemoryAccesses(MemoryAccesses, LocalMemoryAccesses);
+    computeLoadAndStoreProperties(MemoryAccesses, LocalMemoryAccesses);
   }
 
   // Do this work in a separate loop after copying the iterators so that we
