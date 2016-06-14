@@ -303,14 +303,10 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
   for (const auto it : LocalIdToSourceLocationMap) {
     const SourceLocation &E = it.second;
     Value *Line = ConstantInt::get(Int32Ty, E.Line);
-
-    // TODO(ddoucet): It'd be nice to reuse the global variables since
-    // most module names will be the same. Do the pointers have the
-    // same value as well or do we actually have to hash the string?
     Constant *FileStrConstant = ConstantDataArray::getString(C, E.File);
     GlobalVariable *GV = new GlobalVariable(
         M, FileStrConstant->getType(), true, GlobalValue::PrivateLinkage,
-        FileStrConstant, "", nullptr, GlobalVariable::NotThreadLocal, 0);
+        FileStrConstant, "__csi_unit_filename", nullptr, GlobalVariable::NotThreadLocal, 0);
     GV->setUnnamedAddr(true);
     Constant *File =
         ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
