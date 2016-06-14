@@ -33,10 +33,11 @@ const int CsiUnitCtorPriority = 65535;
 /// Return the first DILocation in the given basic block, or nullptr
 /// if none exists.
 DILocation *getFirstDebugLoc(BasicBlock &BB) {
-  for (Instruction &Inst : BB)
-    if (DILocation *Loc = Inst.getDebugLoc())
+  for (Instruction &Inst : BB) {
+    if (DILocation *Loc = Inst.getDebugLoc()) {
       return Loc;
-
+    }
+  }
   return nullptr;
 }
 
@@ -47,13 +48,7 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
 class FrontEndDataTable {
 public:
   FrontEndDataTable() {}
-  FrontEndDataTable(Module &M, StringRef BaseIdName) {
-    LLVMContext &C = M.getContext();
-    IntegerType *Int64Ty = IntegerType::get(C, 64);
-    GlobalVariable *GV = new GlobalVariable(M, Int64Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int64Ty, 0), BaseIdName);
-    assert(GV);
-    idSpace = IdSpace(GV);
-  }
+  FrontEndDataTable(Module &M, StringRef BaseIdName);
 
   /// The number of entries in this FED table
   uint64_t size() const {
@@ -67,33 +62,18 @@ public:
 
   /// Add the given Function to this FED table.
   /// \returns The local ID of the Function.
-  uint64_t add(Function &F) {
-    uint64_t Id = add(F.getSubprogram());
-    valueToLocalIdMap[&F] = Id;
-    return Id;
-  }
+  uint64_t add(Function &F);
 
   /// Add the given BasicBlock to this FED table.
   /// \returns The local ID of the BasicBlock.
-  uint64_t add(BasicBlock &BB) {
-    uint64_t Id = add(getFirstDebugLoc(BB));
-    valueToLocalIdMap[&BB] = Id;
-    return Id;
-  }
+  uint64_t add(BasicBlock &BB);
 
   /// Add the given Instruction to this FED table.
   /// \returns The local ID of the Instruction.
-  uint64_t add(Instruction &I) {
-    uint64_t Id = add(I.getDebugLoc());
-    valueToLocalIdMap[&I] = Id;
-    return Id;
-  }
+  uint64_t add(Instruction &I);
 
   /// Get the local ID of the given Value.
-  uint64_t getId(Value *V) {
-    assert(valueToLocalIdMap.find(V) != valueToLocalIdMap.end() && "Value not in ID map.");
-    return valueToLocalIdMap[V];
-  }
+  uint64_t getId(Value *V);
 
   /// Converts a local to global ID conversion.
   ///
@@ -103,53 +83,17 @@ public:
   ///
   /// \returns A Value holding the global ID corresponding to the
   /// given local ID.
-  Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const {
-    return idSpace.localToGlobalId(LocalId, IRB);
-  }
+  Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const;
 
   /// Get the Type for a pointer to a FED table entry.
-  static PointerType *getPointerType(LLVMContext &C) {
-    return PointerType::get(getEntryStructType(C), 0);
-  }
+  static PointerType *getPointerType(LLVMContext &C);
 
   /// Insert this FED table into the given Module.
   ///
   /// The FED table is constructed as a ConstantArray indexed by local IDs.
   /// The runtime is responsible for performing the mapping that allows the table
   /// to be indexed by global ID.
-  Constant *insertIntoModule(Module &M) const {
-    LLVMContext &C = M.getContext();
-    StructType *FedType = getEntryStructType(C);
-    IntegerType *Int32Ty = IntegerType::get(C, 32);
-    Constant *Zero = ConstantInt::get(Int32Ty, 0);
-    Value *GepArgs[] = {Zero, Zero};
-
-    IRBuilder<> IRB(C);
-    SmallVector<Constant *, 4> EntryConstants;
-
-    for (EntryList::const_iterator it = entries.cbegin(), ite = entries.cend(); it != ite; ++it) {
-      const Entry &E = it->second;
-      Value *Line = ConstantInt::get(Int32Ty, E.Line);
-
-      // TODO(ddoucet): It'd be nice to reuse the global variables since most
-      // module names will be the same. Do the pointers have the same value as well
-      // or do we actually have to hash the string?
-      Constant *FileStrConstant = ConstantDataArray::getString(C, E.File);
-      GlobalVariable *GV = new GlobalVariable(M, FileStrConstant->getType(),
-                                              true, GlobalValue::PrivateLinkage,
-                                              FileStrConstant, "", nullptr,
-                                              GlobalVariable::NotThreadLocal, 0);
-      GV->setUnnamedAddr(true);
-      Constant *File = ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
-
-      EntryConstants.push_back(ConstantStruct::get(FedType, Line, File, nullptr));
-    }
-
-    ArrayType *FedArrayType = ArrayType::get(getEntryStructType(C), EntryConstants.size());
-    Constant *Table = ConstantArray::get(FedArrayType, EntryConstants);
-    GlobalVariable *GV = new GlobalVariable(M, FedArrayType, false, GlobalValue::InternalLinkage, Table, CsiUnitFedTableName);
-    return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
-  }
+  Constant *insertIntoModule(Module &M) const;
 
 private:
   class IdSpace {
@@ -188,35 +132,23 @@ private:
   IdSpace idSpace;
   std::map<Value *, uint64_t> valueToLocalIdMap;
 
-  // Create a struct type to match the "struct source_loc_t" defined in csirt.c
-  static StructType *getEntryStructType(LLVMContext &C) {
-    return StructType::get(IntegerType::get(C, 32),
-                           PointerType::get(IntegerType::get(C, 8), 0),
-                           nullptr);
-  }
+  /// Create a struct type to match the "struct source_loc_t" defined in csirt.c
+  static StructType *getEntryStructType(LLVMContext &C);
 
-  uint64_t add(DILocation *Loc) {
-    if (Loc) {
-      return add((int32_t)Loc->getLine(), Loc->getFilename());
-    } else {
-      return add(-1, "");
-    }
-  }
+  /// Append the debug information to the table, assigning it the next
+  /// available ID.
+  ///
+  /// \returns The local ID of the appended information.
+  /// @{
+  uint64_t add(DILocation *Loc);
+  uint64_t add(DISubprogram *Subprog);
+  /// @}
 
-  uint64_t add(DISubprogram *Subprog) {
-    if (Subprog) {
-      return add((int32_t)Subprog->getLine(), Subprog->getFilename());
-    } else {
-      return add(-1, "");
-    }
-  }
-
-  uint64_t add(int32_t Line, StringRef File) {
-    uint64_t Id = idSpace.getNextLocalId();
-    assert(entries.find(Id) == entries.end() && "Id already exists in FED table.");
-    entries[Id] = { Line, File };
-    return Id;
-  }
+  /// Append the line and file information to the table, assigning it
+  /// the next available ID.
+  ///
+  /// \returns The new local ID of the DILocation.
+  uint64_t add(int32_t Line, StringRef File);
 };
 
 struct ComprehensiveStaticInstrumentation : public ModulePass {
@@ -287,6 +219,108 @@ const char *ComprehensiveStaticInstrumentation::getPassName() const {
 
 ModulePass *llvm::createComprehensiveStaticInstrumentationPass() {
   return new ComprehensiveStaticInstrumentation();
+}
+
+FrontEndDataTable::FrontEndDataTable(Module &M, StringRef BaseIdName) {
+  LLVMContext &C = M.getContext();
+  IntegerType *Int64Ty = IntegerType::get(C, 64);
+  GlobalVariable *GV = new GlobalVariable(M, Int64Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int64Ty, 0), BaseIdName);
+  assert(GV);
+  idSpace = IdSpace(GV);
+}
+
+uint64_t FrontEndDataTable::add(Function &F) {
+  uint64_t Id = add(F.getSubprogram());
+  valueToLocalIdMap[&F] = Id;
+  return Id;
+}
+
+uint64_t FrontEndDataTable::add(BasicBlock &BB) {
+  uint64_t Id = add(getFirstDebugLoc(BB));
+  valueToLocalIdMap[&BB] = Id;
+  return Id;
+}
+
+uint64_t FrontEndDataTable::add(Instruction &I) {
+  uint64_t Id = add(I.getDebugLoc());
+  valueToLocalIdMap[&I] = Id;
+  return Id;
+}
+
+uint64_t FrontEndDataTable::getId(Value *V) {
+  assert(valueToLocalIdMap.find(V) != valueToLocalIdMap.end() && "Value not in ID map.");
+  return valueToLocalIdMap[V];
+}
+
+Value *FrontEndDataTable::localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const {
+  return idSpace.localToGlobalId(LocalId, IRB);
+}
+
+PointerType *FrontEndDataTable::getPointerType(LLVMContext &C) {
+  return PointerType::get(getEntryStructType(C), 0);
+}
+
+StructType *FrontEndDataTable::getEntryStructType(LLVMContext &C) {
+  return StructType::get(IntegerType::get(C, 32),
+                         PointerType::get(IntegerType::get(C, 8), 0),
+                         nullptr);
+}
+
+uint64_t FrontEndDataTable::add(DILocation *Loc) {
+  if (Loc) {
+    return add((int32_t)Loc->getLine(), Loc->getFilename());
+  } else {
+    return add(-1, "");
+  }
+}
+
+uint64_t FrontEndDataTable::add(DISubprogram *Subprog) {
+  if (Subprog) {
+    return add((int32_t)Subprog->getLine(), Subprog->getFilename());
+  } else {
+    return add(-1, "");
+  }
+}
+
+uint64_t FrontEndDataTable::add(int32_t Line, StringRef File) {
+  uint64_t Id = idSpace.getNextLocalId();
+  assert(entries.find(Id) == entries.end() && "Id already exists in FED table.");
+  entries[Id] = { Line, File };
+  return Id;
+}
+
+Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
+  LLVMContext &C = M.getContext();
+  StructType *FedType = getEntryStructType(C);
+  IntegerType *Int32Ty = IntegerType::get(C, 32);
+  Constant *Zero = ConstantInt::get(Int32Ty, 0);
+  Value *GepArgs[] = {Zero, Zero};
+
+  IRBuilder<> IRB(C);
+  SmallVector<Constant *, 4> EntryConstants;
+
+  for (EntryList::const_iterator it = entries.cbegin(), ite = entries.cend(); it != ite; ++it) {
+    const Entry &E = it->second;
+    Value *Line = ConstantInt::get(Int32Ty, E.Line);
+
+    // TODO(ddoucet): It'd be nice to reuse the global variables since most
+    // module names will be the same. Do the pointers have the same value as well
+    // or do we actually have to hash the string?
+    Constant *FileStrConstant = ConstantDataArray::getString(C, E.File);
+    GlobalVariable *GV = new GlobalVariable(M, FileStrConstant->getType(),
+                                            true, GlobalValue::PrivateLinkage,
+                                            FileStrConstant, "", nullptr,
+                                            GlobalVariable::NotThreadLocal, 0);
+    GV->setUnnamedAddr(true);
+    Constant *File = ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
+
+    EntryConstants.push_back(ConstantStruct::get(FedType, Line, File, nullptr));
+  }
+
+  ArrayType *FedArrayType = ArrayType::get(getEntryStructType(C), EntryConstants.size());
+  Constant *Table = ConstantArray::get(FedArrayType, EntryConstants);
+  GlobalVariable *GV = new GlobalVariable(M, FedArrayType, false, GlobalValue::InternalLinkage, Table, CsiUnitFedTableName);
+  return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
 }
 
 void ComprehensiveStaticInstrumentation::initializeFuncHooks(Module &M) {
