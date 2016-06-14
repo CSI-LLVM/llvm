@@ -1,7 +1,7 @@
 add_llvm_library(LLVMInstrumentation
   AddressSanitizer.cpp
   BoundsChecking.cpp
-  CodeSpectatorInterface.cpp
+  ComprehensiveStaticInstrumentation.cpp
   DataFlowSanitizer.cpp
   GCOVProfiling.cpp
   MemorySanitizer.cpp

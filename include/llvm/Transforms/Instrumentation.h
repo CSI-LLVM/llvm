@@ -83,12 +83,6 @@ struct InstrProfOptions {
 ModulePass *createInstrProfilingPass(
     const InstrProfOptions &Options = InstrProfOptions());
 
-// Insert CodeSpectatorInterface instrumentation
-// ANGE XXX: Should probably add different compiler flag options
-ModulePass *createCodeSpectatorInterfacePass();
-// Insert CodeSpectatorInterface link-time pass
-ModulePass *createCodeSpectatorInterfaceLTPass();
-
 // Insert AddressSanitizer (address sanity checking) instrumentation
 FunctionPass *createAddressSanitizerFunctionPass(bool CompileKernel = false);
 ModulePass *createAddressSanitizerModulePass(bool CompileKernel = false);
@@ -134,6 +128,9 @@ inline ModulePass *createDataFlowSanitizerPassForJIT(
 }
 #endif
 
+// Insert ComprehensiveStaticInstrumentation instrumentation
+ModulePass *createComprehensiveStaticInstrumentationPass();
+    
 // BoundsChecking - This pass instruments the code to perform run-time bounds
 // checking on loads, stores, and other memory intrinsics.
 FunctionPass *createBoundsCheckingPass();

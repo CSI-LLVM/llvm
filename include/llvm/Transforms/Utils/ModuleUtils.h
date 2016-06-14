@@ -45,10 +45,11 @@ GlobalVariable *collectUsedGlobalVariables(Module &M,
                                            SmallPtrSetImpl<GlobalValue *> &Set,
                                            bool CompilerUsed);
 
-// Validate the result of Module::getOrInsertFunction called for an interface
-// function of CodeSpectatorInterface. If the instrumented module defines a function
-// with the same name, their prototypes must match, otherwise
-// getOrInsertFunction returns a bitcast.
+// Validate the result of Module::getOrInsertFunction called for an
+// interface function of ComprehensiveStaticInstrumentation. If the
+// instrumented module defines a function with the same name, their
+// prototypes must match, otherwise getOrInsertFunction returns a
+// bitcast.
 Function *checkCsiInterfaceFunction(Constant *FuncOrBitcast);
 
 // Validate the result of Module::getOrInsertFunction called for an interface

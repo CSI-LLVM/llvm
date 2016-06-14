@@ -288,10 +288,10 @@ typedef struct {
   bool read_before_write_in_bb;
 } csi_acc_prop_t;
 
-struct CodeSpectatorInterface : public ModulePass {
+struct ComprehensiveStaticInstrumentation : public ModulePass {
   static char ID;
 
-  CodeSpectatorInterface() : ModulePass(ID) {}
+  ComprehensiveStaticInstrumentation() : ModulePass(ID) {}
   const char *getPassName() const override;
   bool doInitialization(Module &M) override;
   bool runOnModule(Module &M) override;
@@ -363,20 +363,20 @@ private:
   Type *IntptrTy;
 
   std::map<std::string, uint64_t> FuncOffsetMap;
-}; //struct CodeSpectatorInterface
+}; //struct ComprehensiveStaticInstrumentation
 } // anonymous namespace
 
 // the address matters but not the init value
-char CodeSpectatorInterface::ID = 0;
-INITIALIZE_PASS(CodeSpectatorInterface, "CSI-func", "CodeSpectatorInterface function pass",
-                false, false)
+char ComprehensiveStaticInstrumentation::ID = 0;
+INITIALIZE_PASS(ComprehensiveStaticInstrumentation, "CSI-func",
+                "ComprehensiveStaticInstrumentation pass", false, false)
 
-const char *CodeSpectatorInterface::getPassName() const {
-  return "CodeSpectatorInterface";
+const char *ComprehensiveStaticInstrumentation::getPassName() const {
+  return "ComprehensiveStaticInstrumentation";
 }
 
-ModulePass *llvm::createCodeSpectatorInterfacePass() {
-  return new CodeSpectatorInterface();
+ModulePass *llvm::createComprehensiveStaticInstrumentationPass() {
+  return new ComprehensiveStaticInstrumentation();
 }
 
 /**
@@ -385,7 +385,7 @@ ModulePass *llvm::createCodeSpectatorInterfacePass() {
  * void __csi_func_entry(uint64_t csi_id, void *function, void *return_addr, char *func_name);
  * void __csi_func_exit(uint64_t csi_id, void *function, void *return_addr, char *func_name);
  */
-void CodeSpectatorInterface::initializeFuncCallbacks(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeFuncCallbacks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   CsiFuncEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
       "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), nullptr));
@@ -393,7 +393,7 @@ void CodeSpectatorInterface::initializeFuncCallbacks(Module &M) {
       "__csi_func_exit", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
 }
 
-void CodeSpectatorInterface::initializeBasicBlockCallbacks(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeBasicBlockCallbacks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   SmallVector<Type *, 4> ArgTypes({IRB.getInt64Ty()});
   FunctionType *FnType = FunctionType::get(IRB.getVoidTy(), ArgTypes, false);
@@ -404,7 +404,7 @@ void CodeSpectatorInterface::initializeBasicBlockCallbacks(Module &M) {
       M.getOrInsertFunction("__csi_bb_exit", FnType));
 }
 
-void CodeSpectatorInterface::initializeCallsiteCallbacks(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeCallsiteCallbacks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   SmallVector<Type *, 4> ArgTypes({IRB.getInt64Ty(), IRB.getInt64Ty()});
   FunctionType *FnType = FunctionType::get(IRB.getVoidTy(), ArgTypes, false);
@@ -423,7 +423,7 @@ void CodeSpectatorInterface::initializeCallsiteCallbacks(Module &M) {
  *
  * Presumably aligned / unaligned accesses are specified by the attr
  */
-void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeLoadStoreCallbacks(Module &M) {
 
   IRBuilder<> IRB(M.getContext());
   Type *RetType = IRB.getVoidTy();            // return void
@@ -464,7 +464,7 @@ void CodeSpectatorInterface::initializeLoadStoreCallbacks(Module &M) {
                             IRB.getInt32Ty(), IntptrTy, nullptr));
 }
 
-FunctionType *CodeSpectatorInterface::getInitRelTableFunctionType(LLVMContext &C) {
+FunctionType *ComprehensiveStaticInstrumentation::getInitRelTableFunctionType(LLVMContext &C) {
   // This must match the definition of __csi_init_rel_tables_t in csirt.c.
   // typedef void (*__csi_init_rel_tables_t)(rel_table *rel_bb_to_func, rel_range_table *rel_func_to_bb);
   SmallVector<Type *, 2> ArgTypes({
@@ -475,7 +475,7 @@ FunctionType *CodeSpectatorInterface::getInitRelTableFunctionType(LLVMContext &C
   return FunctionType::get(Type::getVoidTy(C), ArgTypes, false);
 }
 
-int CodeSpectatorInterface::getNumBytesAccessed(Value *Addr,
+int ComprehensiveStaticInstrumentation::getNumBytesAccessed(Value *Addr,
                                                 const DataLayout &DL) {
   Type *OrigPtrTy = Addr->getType();
   Type *OrigTy = cast<PointerType>(OrigPtrTy)->getElementType();
@@ -490,7 +490,7 @@ int CodeSpectatorInterface::getNumBytesAccessed(Value *Addr,
   return TypeSize / 8;
 }
 
-bool CodeSpectatorInterface::addLoadStoreInstrumentation(BasicBlock::iterator Iter,
+bool ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock::iterator Iter,
                                                          Function *BeforeFn,
                                                          Function *AfterFn,
                                                          Value *CsiId,
@@ -529,7 +529,7 @@ bool CodeSpectatorInterface::addLoadStoreInstrumentation(BasicBlock::iterator It
   return true;
 }
 
-bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
+bool ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::iterator Iter,
                                                    csi_acc_prop_t prop,
                                                    const DataLayout &DL) {
 
@@ -577,7 +577,7 @@ bool CodeSpectatorInterface::instrumentLoadOrStore(BasicBlock::iterator Iter,
 // Since our pass runs after everyone else, the calls should not be
 // replaced back with intrinsics. If that becomes wrong at some point,
 // we will need to call e.g. __csi_memset to avoid the intrinsics.
-void CodeSpectatorInterface::instrumentMemIntrinsic(BasicBlock::iterator Iter) {
+void ComprehensiveStaticInstrumentation::instrumentMemIntrinsic(BasicBlock::iterator Iter) {
   Instruction *I = &(*Iter);
   IRBuilder<> IRB(I);
   if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
@@ -597,7 +597,7 @@ void CodeSpectatorInterface::instrumentMemIntrinsic(BasicBlock::iterator Iter) {
   }
 }
 
-bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
+bool ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   IRBuilder<> IRB(BB.getFirstInsertionPt());
   uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
@@ -612,7 +612,7 @@ bool CodeSpectatorInterface::instrumentBasicBlock(BasicBlock &BB) {
   return true;
 }
 
-void CodeSpectatorInterface::instrumentCallsite(BasicBlock::iterator Iter) {
+void ComprehensiveStaticInstrumentation::instrumentCallsite(BasicBlock::iterator Iter) {
   IRBuilder<> IRB(&(*Iter));
   CallSite CS(Iter);
   Instruction *Inst = CS.getInstruction();
@@ -641,7 +641,7 @@ void CodeSpectatorInterface::instrumentCallsite(BasicBlock::iterator Iter) {
   IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId});
 }
 
-bool CodeSpectatorInterface::doInitialization(Module &M) {
+bool ComprehensiveStaticInstrumentation::doInitialization(Module &M) {
   DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
 
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
@@ -651,7 +651,7 @@ bool CodeSpectatorInterface::doInitialization(Module &M) {
   return true;
 }
 
-void CodeSpectatorInterface::initializeFEDTables(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeFEDTables(Module &M) {
   FunctionFED = FrontEndDataTable(M, CsiFunctionBaseIdName);
   FunctionExitFED = FrontEndDataTable(M, CsiFunctionExitBaseIdName);
   BasicBlockFED = FrontEndDataTable(M, CsiBasicBlockBaseIdName);
@@ -660,7 +660,7 @@ void CodeSpectatorInterface::initializeFEDTables(Module &M) {
   StoreFED = FrontEndDataTable(M, CsiStoreBaseIdName);
 }
 
-void CodeSpectatorInterface::initializeRelTableFunctions(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeRelTableFunctions(Module &M) {
   FunctionType *FnType = getInitRelTableFunctionType(M.getContext());
   InitRelTables = checkCsiInterfaceFunction(M.getOrInsertFunction(CsiInitRelTablesName, FnType));
   assert(InitRelTables);
@@ -672,7 +672,7 @@ void CodeSpectatorInterface::initializeRelTableFunctions(Module &M) {
   InitCallsiteToFunction->setLinkage(GlobalValue::InternalLinkage);
 }
 
-void CodeSpectatorInterface::generateInitRelationTables(Module &M) {
+void ComprehensiveStaticInstrumentation::generateInitRelationTables(Module &M) {
   LLVMContext &C = M.getContext();
   BasicBlock *EntryBB = BasicBlock::Create(C, "", InitRelTables);
   IRBuilder<> IRB(ReturnInst::Create(C, EntryBB));
@@ -729,7 +729,7 @@ void CodeSpectatorInterface::generateInitRelationTables(Module &M) {
   }
 }
 
-void CodeSpectatorInterface::generateInitCallsiteToFunction(Module &M) {
+void ComprehensiveStaticInstrumentation::generateInitCallsiteToFunction(Module &M) {
   LLVMContext &C = M.getContext();
   BasicBlock *EntryBB = BasicBlock::Create(C, "", InitCallsiteToFunction);
   IRBuilder<> IRB(ReturnInst::Create(C, EntryBB));
@@ -747,7 +747,7 @@ void CodeSpectatorInterface::generateInitCallsiteToFunction(Module &M) {
   }
 }
 
-void CodeSpectatorInterface::InitializeCsi(Module &M) {
+void ComprehensiveStaticInstrumentation::InitializeCsi(Module &M) {
   initializeFEDTables(M);
   initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
@@ -774,7 +774,7 @@ Constant *fedTableToUnitFedTable(Module &M,
   return ConstantStruct::get(UnitFedTableType, NumEntries, FedTable.baseId(), InsertedTable, nullptr);
 }
 
-void CodeSpectatorInterface::FinalizeCsi(Module &M) {
+void ComprehensiveStaticInstrumentation::FinalizeCsi(Module &M) {
   LLVMContext &C = M.getContext();
 
   // Add CSI global constructor, which calls unit init.
@@ -841,13 +841,13 @@ void CodeSpectatorInterface::FinalizeCsi(Module &M) {
   CNCtor->addCalledFunction(Call, CNFunc);
 }
 
-void CodeSpectatorInterface::getAnalysisUsage(AnalysisUsage &AU) const {
+void ComprehensiveStaticInstrumentation::getAnalysisUsage(AnalysisUsage &AU) const {
   AU.addRequired<CallGraphWrapperPass>();
 }
 
 // Recursively determine if F calls G. Return true if so. Conservatively, if F makes
 // any internal indirect function calls, assume it calls G.
-bool CodeSpectatorInterface::FunctionCallsFunction(Function *F, Function *G) {
+bool ComprehensiveStaticInstrumentation::FunctionCallsFunction(Function *F, Function *G) {
   assert(F && G && CG);
   CallGraphNode *CGN = (*CG)[F];
   // Assume external functions cannot make calls to internal functions.
@@ -874,7 +874,7 @@ bool CodeSpectatorInterface::FunctionCallsFunction(Function *F, Function *G) {
   return false;
 }
 
-bool CodeSpectatorInterface::ShouldNotInstrumentFunction(Function &F) {
+bool ComprehensiveStaticInstrumentation::ShouldNotInstrumentFunction(Function &F) {
     Module &M = *F.getParent();
     if (F.hasName() && F.getName() == CsiRtUnitCtorName) {
         return true;
@@ -899,7 +899,7 @@ bool CodeSpectatorInterface::ShouldNotInstrumentFunction(Function &F) {
     return false;
 }
 
-void CodeSpectatorInterface::computeAttributesForMemoryAccesses(
+void ComprehensiveStaticInstrumentation::computeAttributesForMemoryAccesses(
     SmallVectorImpl<std::pair<BasicBlock::iterator, csi_acc_prop_t> > &MemoryAccesses,
     SmallVectorImpl<BasicBlock::iterator> &LocalAccesses) {
   SmallSet<Value*, 8> WriteTargets;
@@ -923,7 +923,7 @@ void CodeSpectatorInterface::computeAttributesForMemoryAccesses(
   LocalAccesses.clear();
 }
 
-bool CodeSpectatorInterface::runOnModule(Module &M) {
+bool ComprehensiveStaticInstrumentation::runOnModule(Module &M) {
   InitializeCsi(M);
 
   for (Function &F : M)
@@ -933,7 +933,7 @@ bool CodeSpectatorInterface::runOnModule(Module &M) {
   return true;  // we always insert the unit constructor
 }
 
-bool CodeSpectatorInterface::runOnFunction(Function &F) {
+bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
   // This is required to prevent instrumenting the call to
   // __csi_module_init from within the module constructor.
   if (F.empty() || ShouldNotInstrumentFunction(F)) {
