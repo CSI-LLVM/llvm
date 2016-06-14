@@ -47,7 +47,7 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
 /// CSI ID corresponds to.
 class FrontEndDataTable {
 public:
-  FrontEndDataTable() {}
+  FrontEndDataTable() : BaseId(nullptr), IdCounter(0) {}
   FrontEndDataTable(Module &M, StringRef BaseIdName);
 
   /// The number of entries in this FED table
@@ -57,7 +57,7 @@ public:
 
   /// The GlobalVariable holding the base ID for this FED table.
   GlobalVariable *baseId() const {
-    return idSpace.base();
+    return BaseId;
   }
 
   /// Add the given Function to this FED table.
@@ -96,31 +96,6 @@ public:
   Constant *insertIntoModule(Module &M) const;
 
 private:
-  class IdSpace {
-  public:
-    IdSpace() : BaseId(nullptr), IdCounter(0) {}
-    IdSpace(GlobalVariable *Base) : BaseId(Base), IdCounter(0) {}
-
-    uint64_t getNextLocalId() {
-      return IdCounter++;
-    }
-
-    Value *localToGlobalId(uint64_t Id, IRBuilder<> IRB) const {
-      assert(BaseId);
-      Value *Base = IRB.CreateLoad(BaseId);
-      Value *Offset = IRB.getInt64(Id);
-      return IRB.CreateAdd(Base, Offset);
-    }
-
-    GlobalVariable *base() const {
-      assert(BaseId);
-      return BaseId;
-    }
-  private:
-    GlobalVariable *BaseId;
-    uint64_t IdCounter;
-  };
-
   struct Entry {
     int32_t Line;
     StringRef File;
@@ -128,8 +103,9 @@ private:
 
   typedef std::map<uint64_t, Entry> EntryList;
 
+  GlobalVariable *BaseId;
+  uint64_t IdCounter;
   EntryList entries;
-  IdSpace idSpace;
   std::map<Value *, uint64_t> valueToLocalIdMap;
 
   /// Create a struct type to match the "struct source_loc_t" defined in csirt.c
@@ -224,9 +200,9 @@ ModulePass *llvm::createComprehensiveStaticInstrumentationPass() {
 FrontEndDataTable::FrontEndDataTable(Module &M, StringRef BaseIdName) {
   LLVMContext &C = M.getContext();
   IntegerType *Int64Ty = IntegerType::get(C, 64);
-  GlobalVariable *GV = new GlobalVariable(M, Int64Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int64Ty, 0), BaseIdName);
-  assert(GV);
-  idSpace = IdSpace(GV);
+  IdCounter = 0;
+  BaseId = new GlobalVariable(M, Int64Ty, false, GlobalValue::InternalLinkage, ConstantInt::get(Int64Ty, 0), BaseIdName);
+  assert(BaseId);
 }
 
 uint64_t FrontEndDataTable::add(Function &F) {
@@ -253,7 +229,10 @@ uint64_t FrontEndDataTable::getId(Value *V) {
 }
 
 Value *FrontEndDataTable::localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const {
-  return idSpace.localToGlobalId(LocalId, IRB);
+  assert(BaseId);
+  Value *Base = IRB.CreateLoad(BaseId);
+  Value *Offset = IRB.getInt64(LocalId);
+  return IRB.CreateAdd(Base, Offset);
 }
 
 PointerType *FrontEndDataTable::getPointerType(LLVMContext &C) {
@@ -283,7 +262,7 @@ uint64_t FrontEndDataTable::add(DISubprogram *Subprog) {
 }
 
 uint64_t FrontEndDataTable::add(int32_t Line, StringRef File) {
-  uint64_t Id = idSpace.getNextLocalId();
+  uint64_t Id = IdCounter++;
   assert(entries.find(Id) == entries.end() && "Id already exists in FED table.");
   entries[Id] = { Line, File };
   return Id;
