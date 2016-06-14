@@ -52,7 +52,7 @@ public:
 
   /// The number of entries in this FED table
   uint64_t size() const {
-    return entries.size();
+    return LocalIdToSourceLocationMap.size();
   }
 
   /// The GlobalVariable holding the base ID for this FED table.
@@ -86,6 +86,8 @@ public:
   Value *localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const;
 
   /// Get the Type for a pointer to a FED table entry.
+  ///
+  /// A FED table entry is just a source location.
   static PointerType *getPointerType(LLVMContext &C);
 
   /// Insert this FED table into the given Module.
@@ -96,20 +98,22 @@ public:
   Constant *insertIntoModule(Module &M) const;
 
 private:
-  struct Entry {
+  struct SourceLocation {
     int32_t Line;
     StringRef File;
   };
 
-  typedef std::map<uint64_t, Entry> EntryList;
-
+  /// The GlobalVariable holding the base ID for this FED table.
   GlobalVariable *BaseId;
+  /// Counter of local IDs used so far.
   uint64_t IdCounter;
-  EntryList entries;
-  std::map<Value *, uint64_t> valueToLocalIdMap;
+  /// Map of local ID to SourceLocation.
+  std::map<uint64_t, SourceLocation> LocalIdToSourceLocationMap;
+  /// Map of Value to Local ID.
+  std::map<Value *, uint64_t> ValueToLocalIdMap;
 
-  /// Create a struct type to match the "struct source_loc_t" defined in csirt.c
-  static StructType *getEntryStructType(LLVMContext &C);
+  /// Create a struct type to match the "struct SourceLocation" type.
+  static StructType *getSourceLocStructType(LLVMContext &C);
 
   /// Append the debug information to the table, assigning it the next
   /// available ID.
@@ -207,25 +211,25 @@ FrontEndDataTable::FrontEndDataTable(Module &M, StringRef BaseIdName) {
 
 uint64_t FrontEndDataTable::add(Function &F) {
   uint64_t Id = add(F.getSubprogram());
-  valueToLocalIdMap[&F] = Id;
+  ValueToLocalIdMap[&F] = Id;
   return Id;
 }
 
 uint64_t FrontEndDataTable::add(BasicBlock &BB) {
   uint64_t Id = add(getFirstDebugLoc(BB));
-  valueToLocalIdMap[&BB] = Id;
+  ValueToLocalIdMap[&BB] = Id;
   return Id;
 }
 
 uint64_t FrontEndDataTable::add(Instruction &I) {
   uint64_t Id = add(I.getDebugLoc());
-  valueToLocalIdMap[&I] = Id;
+  ValueToLocalIdMap[&I] = Id;
   return Id;
 }
 
 uint64_t FrontEndDataTable::getId(Value *V) {
-  assert(valueToLocalIdMap.find(V) != valueToLocalIdMap.end() && "Value not in ID map.");
-  return valueToLocalIdMap[V];
+  assert(ValueToLocalIdMap.find(V) != ValueToLocalIdMap.end() && "Value not in ID map.");
+  return ValueToLocalIdMap[V];
 }
 
 Value *FrontEndDataTable::localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) const {
@@ -236,10 +240,10 @@ Value *FrontEndDataTable::localToGlobalId(uint64_t LocalId, IRBuilder<> IRB) con
 }
 
 PointerType *FrontEndDataTable::getPointerType(LLVMContext &C) {
-  return PointerType::get(getEntryStructType(C), 0);
+  return PointerType::get(getSourceLocStructType(C), 0);
 }
 
-StructType *FrontEndDataTable::getEntryStructType(LLVMContext &C) {
+StructType *FrontEndDataTable::getSourceLocStructType(LLVMContext &C) {
   return StructType::get(IntegerType::get(C, 32),
                          PointerType::get(IntegerType::get(C, 8), 0),
                          nullptr);
@@ -263,14 +267,15 @@ uint64_t FrontEndDataTable::add(DISubprogram *Subprog) {
 
 uint64_t FrontEndDataTable::add(int32_t Line, StringRef File) {
   uint64_t Id = IdCounter++;
-  assert(entries.find(Id) == entries.end() && "Id already exists in FED table.");
-  entries[Id] = { Line, File };
+  assert(LocalIdToSourceLocationMap.find(Id) == LocalIdToSourceLocationMap.end()
+         && "Id already exists in FED table.");
+  LocalIdToSourceLocationMap[Id] = { Line, File };
   return Id;
 }
 
 Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
   LLVMContext &C = M.getContext();
-  StructType *FedType = getEntryStructType(C);
+  StructType *FedType = getSourceLocStructType(C);
   IntegerType *Int32Ty = IntegerType::get(C, 32);
   Constant *Zero = ConstantInt::get(Int32Ty, 0);
   Value *GepArgs[] = {Zero, Zero};
@@ -278,8 +283,8 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
   IRBuilder<> IRB(C);
   SmallVector<Constant *, 4> EntryConstants;
 
-  for (EntryList::const_iterator it = entries.cbegin(), ite = entries.cend(); it != ite; ++it) {
-    const Entry &E = it->second;
+  for (const auto it : LocalIdToSourceLocationMap) {
+    const SourceLocation &E = it.second;
     Value *Line = ConstantInt::get(Int32Ty, E.Line);
 
     // TODO(ddoucet): It'd be nice to reuse the global variables since most
@@ -296,7 +301,7 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
     EntryConstants.push_back(ConstantStruct::get(FedType, Line, File, nullptr));
   }
 
-  ArrayType *FedArrayType = ArrayType::get(getEntryStructType(C), EntryConstants.size());
+  ArrayType *FedArrayType = ArrayType::get(getSourceLocStructType(C), EntryConstants.size());
   Constant *Table = ConstantArray::get(FedArrayType, EntryConstants);
   GlobalVariable *GV = new GlobalVariable(M, FedArrayType, false, GlobalValue::InternalLinkage, Table, CsiUnitFedTableName);
   return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
