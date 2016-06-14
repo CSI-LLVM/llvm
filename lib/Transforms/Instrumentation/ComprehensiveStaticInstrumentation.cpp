@@ -233,8 +233,7 @@ private:
   void instrumentCallsite(BasicBlock::iterator I);
   void instrumentBasicBlock(BasicBlock &BB);
 
-  bool FunctionCallsFunction(Function *F, Function *G);
-  bool ShouldNotInstrumentFunction(Function &F);
+  bool shouldNotInstrumentFunction(Function &F);
   void InitializeCsi(Module &M);
   void FinalizeCsi(Module &M);
 
@@ -597,36 +596,7 @@ void ComprehensiveStaticInstrumentation::getAnalysisUsage(AnalysisUsage &AU) con
   AU.addRequired<CallGraphWrapperPass>();
 }
 
-// Recursively determine if F calls G. Return true if so. Conservatively, if F makes
-// any internal indirect function calls, assume it calls G.
-bool ComprehensiveStaticInstrumentation::FunctionCallsFunction(Function *F, Function *G) {
-  assert(F && G && CG);
-  CallGraphNode *CGN = (*CG)[F];
-  // Assume external functions cannot make calls to internal functions.
-  if (!F->hasLocalLinkage() && G->hasLocalLinkage()) return false;
-  // Assume function declarations won't make calls to internal
-  // functions. TODO: This may not be correct in general.
-  if (F->isDeclaration()) return false;
-  for (CallGraphNode::iterator it = CGN->begin(), ite = CGN->end(); it != ite; ++it) {
-    Function *Called = it->second->getFunction();
-    if (Called == NULL) {
-      // Indirect call
-      return true;
-    } else if (Called == G) {
-      return true;
-    } else if (G->hasLocalLinkage() && !Called->hasLocalLinkage()) {
-      // Assume external functions cannot make calls to internal functions.
-      continue;
-    }
-  }
-  for (CallGraphNode::iterator it = CGN->begin(), ite = CGN->end(); it != ite; ++it) {
-    Function *Called = it->second->getFunction();
-    if (FunctionCallsFunction(Called, G)) return true;
-  }
-  return false;
-}
-
-bool ComprehensiveStaticInstrumentation::ShouldNotInstrumentFunction(Function &F) {
+bool ComprehensiveStaticInstrumentation::shouldNotInstrumentFunction(Function &F) {
     Module &M = *F.getParent();
     if (F.hasName() && F.getName() == CsiRtUnitCtorName) {
         return true;
@@ -642,8 +612,9 @@ bool ComprehensiveStaticInstrumentation::ShouldNotInstrumentFunction(Function &F
 
         if (Function *CF = dyn_cast<Function>(CS->getOperand(1))) {
             uint64_t Priority = dyn_cast<ConstantInt>(CS->getOperand(0))->getLimitedValue();
-            if (Priority <= CsiUnitCtorPriority) {
-                return CF->getName() == F.getName() ||  FunctionCallsFunction(CF, &F);
+            if (Priority <= CsiUnitCtorPriority && CF->getName() == F.getName()) {
+              // Do not instrument F.
+              return true;
             }
         }
     }
@@ -688,7 +659,7 @@ bool ComprehensiveStaticInstrumentation::runOnModule(Module &M) {
 bool ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   // This is required to prevent instrumenting the call to
   // __csi_module_init from within the module constructor.
-  if (F.empty() || ShouldNotInstrumentFunction(F)) {
+  if (F.empty() || shouldNotInstrumentFunction(F)) {
       return false;
   }
 
