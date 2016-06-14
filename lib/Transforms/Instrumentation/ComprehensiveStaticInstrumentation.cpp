@@ -25,17 +25,6 @@
 
 using namespace llvm;
 
-// see
-// http://llvm.org/docs/ProgrammersManual.html#the-debug-macro-and-debug-option
-// on how to use debugging infrastructure in LLVM
-// also used by STATISTIC macro, so need to define this before using STATISTIC
-#define DEBUG_TYPE "csi-func"
-
-// XXX: Not sure how to turn these on yet
-STATISTIC(NumInstrumentedReads, "Number of instrumented reads");
-STATISTIC(NumInstrumentedWrites, "Number of instrumented writes");
-STATISTIC(NumAccessesWithBadSize, "Number of accesses with bad size");
-
 namespace {
 const char *const CsiRtUnitInitName = "__csirt_unit_init";
 const char *const CsiRtUnitCtorName = "csirt.unit_ctor";
@@ -482,9 +471,6 @@ int ComprehensiveStaticInstrumentation::getNumBytesAccessed(Value *Addr,
   assert(OrigTy->isSized());
   uint32_t TypeSize = DL.getTypeStoreSizeInBits(OrigTy);
   if (TypeSize != 8  && TypeSize != 16 && TypeSize != 32 && TypeSize != 64 && TypeSize != 128) {
-    DEBUG_WITH_TYPE("csi-func",
-        errs() << "Bad size " << TypeSize << " at addr " << Addr << "\n");
-    NumAccessesWithBadSize++;
     return -1;
   }
   return TypeSize / 8;
@@ -532,10 +518,6 @@ bool ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock:
 bool ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::iterator Iter,
                                                    csi_acc_prop_t prop,
                                                    const DataLayout &DL) {
-
-  DEBUG_WITH_TYPE("csi-func",
-      errs() << "CSI_func: instrument instruction " << *Iter << "\n");
-
   Instruction *I = &(*Iter);
   // takes pointer to Instruction and inserts before the instruction
   IRBuilder<> IRB(&(*Iter));
@@ -556,14 +538,11 @@ bool ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::itera
     Value *CsiId = StoreFED.localToGlobalId(LocalId, IRB);
     Res = addLoadStoreInstrumentation(
         Iter, CsiBeforeWrite, CsiAfterWrite, CsiId, AddrType, Addr, NumBytes, prop);
-    NumInstrumentedWrites++;
-
   } else { // is read
     uint64_t LocalId = LoadFED.add(*I);
     Value *CsiId = LoadFED.localToGlobalId(LocalId, IRB);
     Res = addLoadStoreInstrumentation(
         Iter, CsiBeforeRead, CsiAfterRead, CsiId, AddrType, Addr, NumBytes, prop);
-    NumInstrumentedReads++;
   }
 
   return Res;
@@ -642,12 +621,7 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(BasicBlock::iterator
 }
 
 bool ComprehensiveStaticInstrumentation::doInitialization(Module &M) {
-  DEBUG_WITH_TYPE("csi-func", errs() << "CSI_func: doInitialization" << "\n");
-
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
-
-  DEBUG_WITH_TYPE("csi-func",
-      errs() << "CSI_func: doInitialization done" << "\n");
   return true;
 }
 
@@ -940,9 +914,6 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
       return false;
   }
 
-  DEBUG_WITH_TYPE("csi-func",
-                  errs() << "CSI_func: run on function " << F.getName() << "\n");
-
   SmallVector<std::pair<BasicBlock::iterator, csi_acc_prop_t>, 8> MemoryAccesses;
   SmallSet<Value*, 8> WriteTargets;
   SmallVector<BasicBlock::iterator, 8> LocalMemoryAccesses;
@@ -1012,10 +983,6 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
   }
   Modified = true;
 
-  if(Modified) {
-    DEBUG_WITH_TYPE("csi-func",
-        errs() << "CSI_func: modified function " << F.getName() << "\n");
-  }
   return Modified;
 }
 
