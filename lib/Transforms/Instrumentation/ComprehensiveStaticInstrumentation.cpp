@@ -203,17 +203,13 @@ struct ComprehensiveStaticInstrumentation : public ModulePass {
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
 private:
-  bool instrumentFunction(Function &F);
-  int getNumBytesAccessed(Value *Addr, const DataLayout &DL);
-  // Initialize CSI instrumentation functions for load and store
-  void initializeLoadStoreCallbacks(Module &M);
-  // Initialize CSI instrumentation functions for function entry and exit
-  void initializeFuncCallbacks(Module &M);
-  // Basic block entry and exit instrumentation
-  void initializeBasicBlockCallbacks(Module &M);
-  void initializeCallsiteCallbacks(Module &M);
+  void initializeLoadStoreHooks(Module &M);
+  void initializeFuncHooks(Module &M);
+  void initializeBasicBlockHooks(Module &M);
+  void initializeCallsiteHooks(Module &M);
   void initializeFEDTables(Module &M);
 
+  int getNumBytesAccessed(Value *Addr, const DataLayout &DL);
   void computeAttributesForMemoryAccesses(
       SmallVectorImpl<std::pair<BasicBlock::iterator, csi_acc_prop_t> > &Accesses,
       SmallVectorImpl<BasicBlock::iterator> &LocalAccesses);
@@ -228,40 +224,33 @@ private:
                                    csi_acc_prop_t prop);
 
   void instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
-  // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(BasicBlock::iterator I);
   void instrumentCallsite(BasicBlock::iterator I);
   void instrumentBasicBlock(BasicBlock &BB);
+  void instrumentFunction(Function &F);
 
   bool shouldNotInstrumentFunction(Function &F);
-  void InitializeCsi(Module &M);
-  void FinalizeCsi(Module &M);
-
-  CallGraph *CG;
+  void initializeCsi(Module &M);
+  void finalizeCsi(Module &M);
 
   FrontEndDataTable FunctionFED, FunctionExitFED, BasicBlockFED,
     CallsiteFED, LoadFED, StoreFED;
 
-  Function *CsiBeforeRead;
-  Function *CsiAfterRead;
-  Function *CsiBeforeWrite;
-  Function *CsiAfterWrite;
-
-  Function *CsiFuncEntry;
-  Function *CsiFuncExit;
-  Function *CsiBBEntry, *CsiBBExit;
-  Function *MemmoveFn, *MemcpyFn, *MemsetFn;
   Function *CsiBeforeCallsite, *CsiAfterCallsite;
+  Function *CsiFuncEntry, *CsiFuncExit;
+  Function *CsiBBEntry, *CsiBBExit;
+  Function *CsiBeforeRead, *CsiAfterRead;
+  Function *CsiBeforeWrite, *CsiAfterWrite;
 
+  CallGraph *CG;
+  Function *MemmoveFn, *MemcpyFn, *MemsetFn;
   Type *IntptrTy;
-
-  std::map<std::string, uint64_t> FuncOffsetMap;
 }; //struct ComprehensiveStaticInstrumentation
 } // anonymous namespace
 
-// the address matters but not the init value
 char ComprehensiveStaticInstrumentation::ID = 0;
-INITIALIZE_PASS(ComprehensiveStaticInstrumentation, "CSI-func",
+
+INITIALIZE_PASS(ComprehensiveStaticInstrumentation, "csi",
                 "ComprehensiveStaticInstrumentation pass", false, false)
 
 const char *ComprehensiveStaticInstrumentation::getPassName() const {
@@ -272,13 +261,7 @@ ModulePass *llvm::createComprehensiveStaticInstrumentationPass() {
   return new ComprehensiveStaticInstrumentation();
 }
 
-/**
- * initialize the declaration of function call instrumentation functions
- *
- * void __csi_func_entry(uint64_t csi_id, void *function, void *return_addr, char *func_name);
- * void __csi_func_exit(uint64_t csi_id, void *function, void *return_addr, char *func_name);
- */
-void ComprehensiveStaticInstrumentation::initializeFuncCallbacks(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeFuncHooks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   CsiFuncEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
       "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), nullptr));
@@ -286,7 +269,7 @@ void ComprehensiveStaticInstrumentation::initializeFuncCallbacks(Module &M) {
       "__csi_func_exit", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
 }
 
-void ComprehensiveStaticInstrumentation::initializeBasicBlockCallbacks(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeBasicBlockHooks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   SmallVector<Type *, 4> ArgTypes({IRB.getInt64Ty()});
   FunctionType *FnType = FunctionType::get(IRB.getVoidTy(), ArgTypes, false);
@@ -297,7 +280,7 @@ void ComprehensiveStaticInstrumentation::initializeBasicBlockCallbacks(Module &M
       M.getOrInsertFunction("__csi_bb_exit", FnType));
 }
 
-void ComprehensiveStaticInstrumentation::initializeCallsiteCallbacks(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeCallsiteHooks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   SmallVector<Type *, 4> ArgTypes({IRB.getInt64Ty(), IRB.getInt64Ty()});
   FunctionType *FnType = FunctionType::get(IRB.getVoidTy(), ArgTypes, false);
@@ -307,41 +290,26 @@ void ComprehensiveStaticInstrumentation::initializeCallsiteCallbacks(Module &M) 
       M.getOrInsertFunction("__csi_after_call", FnType));
 }
 
-/**
- * initialize the declaration of instrumentation functions
- *
- * void __csi_before_load(uint64_t csi_id, void *addr, uint32_t num_bytes, uint64_t prop);
- *
- * where num_bytes = 1, 2, 4, 8.
- *
- * Presumably aligned / unaligned accesses are specified by the attr
- */
-void ComprehensiveStaticInstrumentation::initializeLoadStoreCallbacks(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeLoadStoreHooks(Module &M) {
 
   IRBuilder<> IRB(M.getContext());
-  Type *RetType = IRB.getVoidTy();            // return void
-  Type *AddrType = IRB.getInt8PtrTy();        // void *addr
-  Type *NumBytesType = IRB.getInt32Ty();      // int num_bytes
+  Type *RetType = IRB.getVoidTy();
+  Type *AddrType = IRB.getInt8PtrTy();
+  Type *NumBytesType = IRB.getInt32Ty();
 
-  // Initialize the instrumentation for reads, writes
-
-  // void __csi_before_load(uint64_t csi_id, void *addr, int num_bytes, int attr);
   CsiBeforeRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_load", RetType,
         IRB.getInt64Ty(), AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
 
-  // void __csi_after_load(uint64_t csi_id, void *addr, int num_bytes, int attr);
   SmallString<32> AfterReadName("__csi_after_load");
   CsiAfterRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_load", RetType,
         IRB.getInt64Ty(), AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
 
-  // void __csi_before_store(uint64_t csi_id, void *addr, int num_bytes, int attr);
   CsiBeforeWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_store", RetType,
         IRB.getInt64Ty(), AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
 
-  // void __csi_after_store(uint64_t csi_id, void *addr, int num_bytes, int attr);
   CsiAfterWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_store", RetType,
         IRB.getInt64Ty(), AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
@@ -409,9 +377,8 @@ void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock:
 void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::iterator Iter,
                                                    csi_acc_prop_t prop,
                                                    const DataLayout &DL) {
-  Instruction *I = &(*Iter);
-  // takes pointer to Instruction and inserts before the instruction
-  IRBuilder<> IRB(&(*Iter));
+  Instruction *I = &*Iter;
+  IRBuilder<> IRB(I);
   bool IsWrite = isa<StoreInst>(I);
   Value *Addr = IsWrite ?
       cast<StoreInst>(I)->getPointerOperand()
@@ -513,12 +480,12 @@ void ComprehensiveStaticInstrumentation::initializeFEDTables(Module &M) {
   StoreFED = FrontEndDataTable(M, CsiStoreBaseIdName);
 }
 
-void ComprehensiveStaticInstrumentation::InitializeCsi(Module &M) {
+void ComprehensiveStaticInstrumentation::initializeCsi(Module &M) {
   initializeFEDTables(M);
-  initializeFuncCallbacks(M);
-  initializeLoadStoreCallbacks(M);
-  initializeBasicBlockCallbacks(M);
-  initializeCallsiteCallbacks(M);
+  initializeFuncHooks(M);
+  initializeLoadStoreHooks(M);
+  initializeBasicBlockHooks(M);
+  initializeCallsiteHooks(M);
 
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
@@ -540,7 +507,7 @@ Constant *fedTableToUnitFedTable(Module &M,
   return ConstantStruct::get(UnitFedTableType, NumEntries, FedTable.baseId(), InsertedTable, nullptr);
 }
 
-void ComprehensiveStaticInstrumentation::FinalizeCsi(Module &M) {
+void ComprehensiveStaticInstrumentation::finalizeCsi(Module &M) {
   LLVMContext &C = M.getContext();
 
   // Add CSI global constructor, which calls unit init.
@@ -647,20 +614,21 @@ void ComprehensiveStaticInstrumentation::computeAttributesForMemoryAccesses(
 }
 
 bool ComprehensiveStaticInstrumentation::runOnModule(Module &M) {
-  InitializeCsi(M);
+  initializeCsi(M);
 
-  for (Function &F : M)
+  for (Function &F : M) {
     instrumentFunction(F);
+  }
 
-  FinalizeCsi(M);
-  return true;  // we always insert the unit constructor
+  finalizeCsi(M);
+  return true;  // We always insert the unit constructor.
 }
 
-bool ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
+void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   // This is required to prevent instrumenting the call to
   // __csi_module_init from within the module constructor.
   if (F.empty() || shouldNotInstrumentFunction(F)) {
-      return false;
+    return;
   }
 
   SmallVector<std::pair<BasicBlock::iterator, csi_acc_prop_t>, 8> MemoryAccesses;
@@ -708,7 +676,6 @@ bool ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   // beginning of the basic block, and then the function entry call goes before
   // the call to basic block entry.
   uint64_t LocalId = FunctionFED.add(F);
-  FuncOffsetMap[F.getName()] = LocalId;
   for (BasicBlock &BB : F) {
     instrumentBasicBlock(BB);
   }
@@ -726,6 +693,4 @@ bool ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
       Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
       IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId});
   }
-
-  return true;
 }
