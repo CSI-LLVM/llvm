@@ -36,8 +36,6 @@ const char *const CsiLoadBaseIdName = "__csi_unit_load_base_id";
 const char *const CsiStoreBaseIdName = "__csi_unit_store_base_id";
 const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
-const char *const CsiInitRelTablesName = "__csi_init_rel_tables";
-const char *const CsiInitCallsiteToFunctionName = "__csi_init_callsite_to_function";
 const char *const CsiUnitFedTableArrayName = "__csi_unit_fed_tables";
 
 const uint64_t CsiCallsiteUnknownTargetId = 0xffffffffffffffff;
@@ -203,74 +201,6 @@ private:
   }
 };
 
-class RelationTable {
-public:
-  typedef std::pair<uint64_t, uint64_t> Range;
-  typedef std::map<Value *, uint64_t>::iterator iterator;
-  typedef std::map<Value *, Range>::iterator range_iterator;
-
-  RelationTable() {}
-
-  size_t size() const { return relations.size() + rangeRelations.size(); }
-  iterator begin() { return relations.begin(); }
-  iterator end() { return relations.end(); }
-  range_iterator range_begin() { return rangeRelations.begin(); }
-  range_iterator range_end() { return rangeRelations.end(); }
-
-  // Add a one-to-one relation of a Value (e.g. basic block) to a
-  // local ID (e.g. the ID of its parent function)
-  void addRelation(Value *V, uint64_t id) {
-    assert(relations.find(V) == relations.end() && "Relation already exists.");
-    assert(rangeRelations.find(V) == rangeRelations.end() && "Relation already exists.");
-    relations[V] = id;
-  }
-
-  // Add a one-to-many relation of a value (e.g. function) to a range
-  // of local IDs (e.g. the IDs of the basic blocks within the
-  // function).
-  void addRelation(Value *V, Range range) {
-    assert(relations.find(V) == relations.end() && "Relation already exists.");
-    assert(rangeRelations.find(V) == rangeRelations.end() && "Relation already exists.");
-    rangeRelations[V] = range;
-  }
-
-  uint64_t get(Value *V) {
-    assert(relations.find(V) != relations.end() && "Relation does not exist.");
-    return relations[V];
-  }
-
-  Range getRange(Value *V) {
-    assert(rangeRelations.find(V) != rangeRelations.end() && "Relation does not exist.");
-    return rangeRelations[V];
-  }
-
-  // Return the range_t LLVM type
-  static StructType *getRangeType(LLVMContext &C) {
-    return StructType::get(IntegerType::get(C, 64),
-                           IntegerType::get(C, 64),
-                           nullptr);
-
-  }
-
-  // Return the CSIRT rel_table LLVM type
-  static StructType *getTableType(LLVMContext &C) {
-    return StructType::get(IntegerType::get(C, 64),
-                           PointerType::get(IntegerType::get(C, 64), 0),
-                           nullptr);
-  }
-
-  // Return the CSIRT rel_range_table LLVM type
-  static StructType *getRangeTableType(LLVMContext &C) {
-    return StructType::get(IntegerType::get(C, 64),
-                           PointerType::get(getRangeType(C), 0),
-                           nullptr);
-  }
-
-private:
-  std::map<Value *, uint64_t> relations;
-  std::map<Value *, Range> rangeRelations;
-};
-
 typedef struct {
   unsigned unused;
   bool unused2, unused3;
@@ -299,9 +229,6 @@ private:
   void initializeBasicBlockCallbacks(Module &M);
   void initializeCallsiteCallbacks(Module &M);
   void initializeFEDTables(Module &M);
-  void initializeRelTableFunctions(Module &M);
-  void generateInitRelationTables(Module &M);
-  void generateInitCallsiteToFunction(Module &M);
 
   // actually insert the instrumentation call
   bool instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
@@ -319,7 +246,6 @@ private:
                                    int NumBytes,
                                    csi_acc_prop_t prop);
 
-  FunctionType *getInitRelTableFunctionType(LLVMContext &C);
   // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(BasicBlock::iterator I);
   void instrumentCallsite(BasicBlock::iterator I);
@@ -334,8 +260,6 @@ private:
   FrontEndDataTable FunctionFED, FunctionExitFED, BasicBlockFED,
     CallsiteFED, LoadFED, StoreFED;
 
-  RelationTable BasicBlockToFunctionRelTable, FunctionToBasicBlocksRelTable;
-
   Function *CsiBeforeRead;
   Function *CsiAfterRead;
   Function *CsiBeforeWrite;
@@ -346,8 +270,6 @@ private:
   Function *CsiBBEntry, *CsiBBExit;
   Function *MemmoveFn, *MemcpyFn, *MemsetFn;
   Function *CsiBeforeCallsite, *CsiAfterCallsite;
-
-  Function *InitRelTables, *InitCallsiteToFunction;
 
   Type *IntptrTy;
 
@@ -451,17 +373,6 @@ void ComprehensiveStaticInstrumentation::initializeLoadStoreCallbacks(Module &M)
   MemsetFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memset", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
                             IRB.getInt32Ty(), IntptrTy, nullptr));
-}
-
-FunctionType *ComprehensiveStaticInstrumentation::getInitRelTableFunctionType(LLVMContext &C) {
-  // This must match the definition of __csi_init_rel_tables_t in csirt.c.
-  // typedef void (*__csi_init_rel_tables_t)(rel_table *rel_bb_to_func, rel_range_table *rel_func_to_bb);
-  SmallVector<Type *, 2> ArgTypes({
-      PointerType::get(RelationTable::getTableType(C), 0),
-      PointerType::get(RelationTable::getRangeTableType(C), 0)
-  });
-
-  return FunctionType::get(Type::getVoidTy(C), ArgTypes, false);
 }
 
 int ComprehensiveStaticInstrumentation::getNumBytesAccessed(Value *Addr,
@@ -586,8 +497,6 @@ bool ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   TerminatorInst *TI = BB.getTerminator();
   IRB.SetInsertPoint(TI);
   IRB.CreateCall(CsiBBExit, {CsiId});
-
-  BasicBlockToFunctionRelTable.addRelation(&BB, FunctionFED.getId(BB.getParent()));
   return true;
 }
 
@@ -634,100 +543,12 @@ void ComprehensiveStaticInstrumentation::initializeFEDTables(Module &M) {
   StoreFED = FrontEndDataTable(M, CsiStoreBaseIdName);
 }
 
-void ComprehensiveStaticInstrumentation::initializeRelTableFunctions(Module &M) {
-  FunctionType *FnType = getInitRelTableFunctionType(M.getContext());
-  InitRelTables = checkCsiInterfaceFunction(M.getOrInsertFunction(CsiInitRelTablesName, FnType));
-  assert(InitRelTables);
-  InitRelTables->setLinkage(GlobalValue::InternalLinkage);
-
-  FnType = FunctionType::get(Type::getVoidTy(M.getContext()), {}, false);
-  InitCallsiteToFunction = checkCsiInterfaceFunction(M.getOrInsertFunction(CsiInitCallsiteToFunctionName, FnType));
-  assert(InitCallsiteToFunction);
-  InitCallsiteToFunction->setLinkage(GlobalValue::InternalLinkage);
-}
-
-void ComprehensiveStaticInstrumentation::generateInitRelationTables(Module &M) {
-  LLVMContext &C = M.getContext();
-  BasicBlock *EntryBB = BasicBlock::Create(C, "", InitRelTables);
-  IRBuilder<> IRB(ReturnInst::Create(C, EntryBB));
-
-  GlobalVariable *FuncBaseGV = FunctionFED.baseId(),
-    *BBBaseGV = BasicBlockFED.baseId();
-  LoadInst *FuncBaseId = IRB.CreateLoad(FuncBaseGV),
-    *BBBaseId = IRB.CreateLoad(BBBaseGV);
-
-  Function::ArgumentListType::iterator ArgIter = InitRelTables->getArgumentList().begin();
-  Argument *RelTablePtr = &(*ArgIter++);
-  Argument *RelRangeTablePtr = &(*ArgIter++);
-  assert(RelTablePtr && RelRangeTablePtr);
-
-  // Load the pointer to the id array from the argument (which is a struct pointer).
-  SmallVector<Value *, 2> Index({ IRB.getInt32(0), // Dereference struct pointer
-        IRB.getInt32(1) });                        // Get address of second field
-  Value *RelTableIdArray = IRB.CreateLoad(IRB.CreateInBoundsGEP(RelTablePtr, Index));
-  for (RelationTable::iterator it = BasicBlockToFunctionRelTable.begin(),
-         ite = BasicBlockToFunctionRelTable.end(); it != ite; ++it) {
-    BasicBlock *BB = dyn_cast<BasicBlock>(it->first);
-    assert(BB);
-    uint64_t bbid = BasicBlockFED.getId(BB), funcid = FunctionFED.getId(BB->getParent());
-    Value *GlobalBBId = IRB.CreateAdd(BBBaseId, IRB.getInt64(bbid));
-    Value *GlobalFuncId = IRB.CreateAdd(FuncBaseId, IRB.getInt64(funcid));
-    // Get the address of the correct element in the id array and store to it.
-    SmallVector<Value *, 1> ArrayIndex({ GlobalBBId });
-    Value *IdPtr = IRB.CreateInBoundsGEP(RelTableIdArray, ArrayIndex);
-    IRB.CreateStore(GlobalFuncId, IdPtr);
-  }
-
-  // Repeat the same for the range table
-  Value *RelRangeTableRangeArray = IRB.CreateLoad(IRB.CreateInBoundsGEP(RelRangeTablePtr, Index));
-  for (RelationTable::range_iterator it = FunctionToBasicBlocksRelTable.range_begin(),
-         ite = FunctionToBasicBlocksRelTable.range_end(); it != ite; ++it) {
-    Function *F = dyn_cast<Function>(it->first);
-    assert(F);
-    uint64_t funcid = FunctionFED.getId(F);
-    uint64_t firstBBId = it->second.first, lastBBId = it->second.second;
-    Value *GlobalFuncId = IRB.CreateAdd(FuncBaseId, IRB.getInt64(funcid));
-    Value *GlobalStartBBId = IRB.CreateAdd(BBBaseId, IRB.getInt64(firstBBId)),
-      *GlobalLastBBId = IRB.CreateAdd(BBBaseId, IRB.getInt64(lastBBId));
-
-    // Create the range_t instance.
-    SmallVector<Constant *, 2> Undefs({UndefValue::get(IntegerType::get(C, 64)), UndefValue::get(IntegerType::get(C, 64))});
-    Constant *RangeStruct = ConstantStruct::getAnon(Undefs);
-    Value *GlobalBBRange = IRB.CreateInsertValue(RangeStruct, GlobalStartBBId, {0});
-    GlobalBBRange = IRB.CreateInsertValue(GlobalBBRange, GlobalLastBBId, {1});
-
-    // Get the address of the correct element in the range array and store to it.
-    SmallVector<Value *, 1> ArrayIndex({ GlobalFuncId });
-    Value *RangePtr = IRB.CreateInBoundsGEP(RelRangeTableRangeArray, ArrayIndex);
-    IRB.CreateStore(GlobalBBRange, RangePtr);
-  }
-}
-
-void ComprehensiveStaticInstrumentation::generateInitCallsiteToFunction(Module &M) {
-  LLVMContext &C = M.getContext();
-  BasicBlock *EntryBB = BasicBlock::Create(C, "", InitCallsiteToFunction);
-  IRBuilder<> IRB(ReturnInst::Create(C, EntryBB));
-
-  GlobalVariable *Base = FunctionFED.baseId();
-  LoadInst *LI = IRB.CreateLoad(Base);
-  for (const auto &it : FuncOffsetMap) {
-    std::string GVName = CsiFuncIdVariablePrefix + it.first;
-    GlobalVariable *GV = nullptr;
-    if ((GV = M.getGlobalVariable(GVName)) == nullptr) {
-        GV = new GlobalVariable(M, IRB.getInt64Ty(), false, GlobalValue::WeakAnyLinkage, IRB.getInt64(CsiCallsiteUnknownTargetId), GVName);
-    }
-    assert(GV);
-    IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
-  }
-}
-
 void ComprehensiveStaticInstrumentation::InitializeCsi(Module &M) {
   initializeFEDTables(M);
   initializeFuncCallbacks(M);
   initializeLoadStoreCallbacks(M);
   initializeBasicBlockCallbacks(M);
   initializeCallsiteCallbacks(M);
-  initializeRelTableFunctions(M);
 
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
 }
@@ -763,23 +584,12 @@ void ComprehensiveStaticInstrumentation::FinalizeCsi(Module &M) {
   // Lookup __csirt_unit_init
   SmallVector<Type *, 4> InitArgTypes({
       IRB.getInt8PtrTy(),
-      PointerType::get(UnitFedTableType, 0),
-      IRB.getInt64Ty(),
-      IRB.getInt64Ty(),
-      InitRelTables->getType(),
-      InitCallsiteToFunction->getType()
+      PointerType::get(UnitFedTableType, 0)
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
       M.getOrInsertFunction(CsiRtUnitInitName, InitFunctionTy));
   assert(InitFunction);
-
-  // Insert __csi_func_id_<f> weak symbols for all defined functions
-  // and generate the runtime code that stores to all of them.
-  generateInitCallsiteToFunction(M);
-
-  // Generate the function body to initialize the relation tables.
-  generateInitRelationTables(M);
 
   SmallVector<Constant *, 4> UnitFedTables({
       fedTableToUnitFedTable(M, UnitFedTableType, BasicBlockFED),
@@ -800,11 +610,7 @@ void ComprehensiveStaticInstrumentation::FinalizeCsi(Module &M) {
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
       IRB.CreateGlobalStringPtr(M.getName()),
-      ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs),
-      IRB.getInt64(BasicBlockToFunctionRelTable.size()),
-      IRB.getInt64(FunctionToBasicBlocksRelTable.size()),
-      InitRelTables,
-      InitCallsiteToFunction
+      ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs)
   });
 
   // Add the constructor to the global list
@@ -964,9 +770,6 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
   for (BasicBlock &BB : F) {
     Modified |= instrumentBasicBlock(BB);
   }
-  uint64_t BBStartId = BasicBlockFED.getId(&F.front()),
-      BBEndId = BasicBlockFED.getId(&F.back());
-  FunctionToBasicBlocksRelTable.addRelation(&F, std::make_pair(BBStartId, BBEndId));
 
   // Instrument function entry/exit points.
   IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
