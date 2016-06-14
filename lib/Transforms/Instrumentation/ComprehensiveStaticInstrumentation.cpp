@@ -81,7 +81,7 @@ public:
   }
 
   uint64_t add(Function &F) {
-    uint64_t Id = add(llvm::getDISubprogram(&F));
+    uint64_t Id = add(F.getSubprogram());
     valueToLocalIdMap[&F] = Id;
     return Id;
   }
@@ -598,7 +598,7 @@ void ComprehensiveStaticInstrumentation::instrumentMemIntrinsic(BasicBlock::iter
 }
 
 bool ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
-  IRBuilder<> IRB(BB.getFirstInsertionPt());
+  IRBuilder<> IRB(&*BB.getFirstInsertionPt());
   uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
 
@@ -613,8 +613,8 @@ bool ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
 }
 
 void ComprehensiveStaticInstrumentation::instrumentCallsite(BasicBlock::iterator Iter) {
-  IRBuilder<> IRB(&(*Iter));
-  CallSite CS(Iter);
+  IRBuilder<> IRB(&*Iter);
+  CallSite CS(&*Iter);
   Instruction *Inst = CS.getInstruction();
   Module *M = Inst->getParent()->getParent()->getParent();
   Function *Called = CS.getCalledFunction();
@@ -998,7 +998,7 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
   FunctionToBasicBlocksRelTable.addRelation(&F, std::make_pair(BBStartId, BBEndId));
 
   // Instrument function entry/exit points.
-  IRBuilder<> IRB(F.getEntryBlock().getFirstInsertionPt());
+  IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
 
   Value *FuncId = FunctionFED.localToGlobalId(LocalId, IRB);
   IRB.CreateCall(CsiFuncEntry, {FuncId});
