@@ -24,6 +24,7 @@ const char *const CsiStoreBaseIdName = "__csi_unit_store_base_id";
 const char *const CsiUnitFedTableName = "__csi_unit_fed_table";
 const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 const char *const CsiUnitFedTableArrayName = "__csi_unit_fed_tables";
+const char *const CsiInitCallsiteToFunctionName = "__csi_init_callsite_to_function";
 
 const int64_t CsiCallsiteUnknownTargetId = -1;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
@@ -208,6 +209,7 @@ private:
   void initializeBasicBlockHooks(Module &M);
   void initializeCallsiteHooks(Module &M);
   void initializeFEDTables(Module &M);
+  void generateInitCallsiteToFunction(Module &M);
 
   int getNumBytesAccessed(Value *Addr, const DataLayout &DL);
   void computeAttributesForMemoryAccesses(
@@ -244,7 +246,9 @@ private:
 
   CallGraph *CG;
   Function *MemmoveFn, *MemcpyFn, *MemsetFn;
+  Function *InitCallsiteToFunction;
   Type *IntptrTy;
+  std::map<std::string, uint64_t> FuncOffsetMap;
 }; //struct ComprehensiveStaticInstrumentation
 } // anonymous namespace
 
@@ -480,12 +484,35 @@ void ComprehensiveStaticInstrumentation::initializeFEDTables(Module &M) {
   StoreFED = FrontEndDataTable(M, CsiStoreBaseIdName);
 }
 
+void ComprehensiveStaticInstrumentation::generateInitCallsiteToFunction(Module &M) {
+  LLVMContext &C = M.getContext();
+  BasicBlock *EntryBB = BasicBlock::Create(C, "", InitCallsiteToFunction);
+  IRBuilder<> IRB(ReturnInst::Create(C, EntryBB));
+
+  GlobalVariable *Base = FunctionFED.baseId();
+  LoadInst *LI = IRB.CreateLoad(Base);
+  for (const auto &it : FuncOffsetMap) {
+    std::string GVName = CsiFuncIdVariablePrefix + it.first;
+    GlobalVariable *GV = nullptr;
+    if ((GV = M.getGlobalVariable(GVName)) == nullptr) {
+      GV = new GlobalVariable(M, IRB.getInt64Ty(), false, GlobalValue::WeakAnyLinkage, IRB.getInt64(CsiCallsiteUnknownTargetId), GVName);
+    }
+    assert(GV);
+    IRB.CreateStore(IRB.CreateAdd(LI, IRB.getInt64(it.second)), GV);
+  }
+}
+
 void ComprehensiveStaticInstrumentation::initializeCsi(Module &M) {
   initializeFEDTables(M);
   initializeFuncHooks(M);
   initializeLoadStoreHooks(M);
   initializeBasicBlockHooks(M);
   initializeCallsiteHooks(M);
+
+  FunctionType *FnType = FunctionType::get(Type::getVoidTy(M.getContext()), {}, false);
+  InitCallsiteToFunction = checkCsiInterfaceFunction(M.getOrInsertFunction(CsiInitCallsiteToFunctionName, FnType));
+  assert(InitCallsiteToFunction);
+  InitCallsiteToFunction->setLinkage(GlobalValue::InternalLinkage);
 
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
   IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
@@ -522,12 +549,17 @@ void ComprehensiveStaticInstrumentation::finalizeCsi(Module &M) {
   // Lookup __csirt_unit_init
   SmallVector<Type *, 4> InitArgTypes({
       IRB.getInt8PtrTy(),
-      PointerType::get(UnitFedTableType, 0)
+      PointerType::get(UnitFedTableType, 0),
+      InitCallsiteToFunction->getType()
   });
   FunctionType *InitFunctionTy = FunctionType::get(IRB.getVoidTy(), InitArgTypes, false);
   Function *InitFunction = checkCsiInterfaceFunction(
       M.getOrInsertFunction(CsiRtUnitInitName, InitFunctionTy));
   assert(InitFunction);
+
+  // Insert __csi_func_id_<f> weak symbols for all defined functions
+  // and generate the runtime code that stores to all of them.
+  generateInitCallsiteToFunction(M);
 
   SmallVector<Constant *, 4> UnitFedTables({
       fedTableToUnitFedTable(M, UnitFedTableType, BasicBlockFED),
@@ -548,7 +580,8 @@ void ComprehensiveStaticInstrumentation::finalizeCsi(Module &M) {
   // Insert call to __csirt_unit_init
   CallInst *Call = IRB.CreateCall(InitFunction, {
       IRB.CreateGlobalStringPtr(M.getName()),
-      ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs)
+      ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs),
+      InitCallsiteToFunction
   });
 
   // Add the constructor to the global list
@@ -676,6 +709,7 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   // beginning of the basic block, and then the function entry call goes before
   // the call to basic block entry.
   uint64_t LocalId = FunctionFED.add(F);
+  FuncOffsetMap[F.getName()] = LocalId;
   for (BasicBlock &BB : F) {
     instrumentBasicBlock(BB);
   }
