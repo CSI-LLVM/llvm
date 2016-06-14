@@ -296,30 +296,31 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
   IntegerType *Int32Ty = IntegerType::get(C, 32);
   Constant *Zero = ConstantInt::get(Int32Ty, 0);
   Value *GepArgs[] = {Zero, Zero};
-
-  IRBuilder<> IRB(C);
-  SmallVector<Constant *, 4> EntryConstants;
+  SmallVector<Constant *, 4> FEDEntries;
 
   for (const auto it : LocalIdToSourceLocationMap) {
     const SourceLocation &E = it.second;
     Value *Line = ConstantInt::get(Int32Ty, E.Line);
     Constant *FileStrConstant = ConstantDataArray::getString(C, E.File);
-    GlobalVariable *GV = new GlobalVariable(
-        M, FileStrConstant->getType(), true, GlobalValue::PrivateLinkage,
-        FileStrConstant, "__csi_unit_filename", nullptr, GlobalVariable::NotThreadLocal, 0);
-    GV->setUnnamedAddr(true);
+    GlobalVariable *GV = M.getGlobalVariable("__csi_unit_filename");
+    if (GV == NULL) {
+      GV = new GlobalVariable(M, FileStrConstant->getType(),
+              true, GlobalValue::PrivateLinkage,
+              FileStrConstant, "__csi_unit_filename", nullptr, GlobalVariable::NotThreadLocal, 0);
+      GV->setUnnamedAddr(true);
+    }
+    assert(GV);
     Constant *File =
-        ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
+      ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
 
-    EntryConstants.push_back(ConstantStruct::get(FedType, Line, File, nullptr));
+    FEDEntries.push_back(ConstantStruct::get(FedType, Line, File, nullptr));
   }
 
-  ArrayType *FedArrayType =
-      ArrayType::get(getSourceLocStructType(C), EntryConstants.size());
-  Constant *Table = ConstantArray::get(FedArrayType, EntryConstants);
+  ArrayType *FedArrayType = ArrayType::get(FedType, FEDEntries.size());
+  Constant *Table = ConstantArray::get(FedArrayType, FEDEntries);
   GlobalVariable *GV =
-      new GlobalVariable(M, FedArrayType, false, GlobalValue::InternalLinkage,
-                         Table, CsiUnitFedTableName);
+    new GlobalVariable(M, FedArrayType, false, GlobalValue::InternalLinkage,
+                       Table, CsiUnitFedTableName);
   return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
 }
 
