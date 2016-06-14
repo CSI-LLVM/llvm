@@ -199,32 +199,26 @@ struct ComprehensiveStaticInstrumentation : public ModulePass {
 
   ComprehensiveStaticInstrumentation() : ModulePass(ID) {}
   const char *getPassName() const override;
-  bool doInitialization(Module &M) override;
   bool runOnModule(Module &M) override;
-  bool runOnFunction(Function &F);
   void getAnalysisUsage(AnalysisUsage &AU) const override;
 
-  // not overriding doFinalization
-
 private:
+  bool instrumentFunction(Function &F);
   int getNumBytesAccessed(Value *Addr, const DataLayout &DL);
-  // initialize CSI instrumentation functions for load and store
+  // Initialize CSI instrumentation functions for load and store
   void initializeLoadStoreCallbacks(Module &M);
-  // initialize CSI instrumentation functions for function entry and exit
+  // Initialize CSI instrumentation functions for function entry and exit
   void initializeFuncCallbacks(Module &M);
   // Basic block entry and exit instrumentation
   void initializeBasicBlockCallbacks(Module &M);
   void initializeCallsiteCallbacks(Module &M);
   void initializeFEDTables(Module &M);
 
-  // actually insert the instrumentation call
-  bool instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
-
   void computeAttributesForMemoryAccesses(
       SmallVectorImpl<std::pair<BasicBlock::iterator, csi_acc_prop_t> > &Accesses,
       SmallVectorImpl<BasicBlock::iterator> &LocalAccesses);
 
-  bool addLoadStoreInstrumentation(BasicBlock::iterator Iter,
+  void addLoadStoreInstrumentation(BasicBlock::iterator Iter,
                                    Function *BeforeFn,
                                    Function *AfterFn,
                                    Value *CsiId,
@@ -233,10 +227,12 @@ private:
                                    int NumBytes,
                                    csi_acc_prop_t prop);
 
+  void instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
   // instrument a call to memmove, memcpy, or memset
   void instrumentMemIntrinsic(BasicBlock::iterator I);
   void instrumentCallsite(BasicBlock::iterator I);
-  bool instrumentBasicBlock(BasicBlock &BB);
+  void instrumentBasicBlock(BasicBlock &BB);
+
   bool FunctionCallsFunction(Function *F, Function *G);
   bool ShouldNotInstrumentFunction(Function &F);
   void InitializeCsi(Module &M);
@@ -374,7 +370,7 @@ int ComprehensiveStaticInstrumentation::getNumBytesAccessed(Value *Addr,
   return TypeSize / 8;
 }
 
-bool ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock::iterator Iter,
+void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock::iterator Iter,
                                                          Function *BeforeFn,
                                                          Function *AfterFn,
                                                          Value *CsiId,
@@ -409,11 +405,9 @@ bool ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock:
        IRB.getInt1(prop.unused2),
        IRB.getInt1(prop.unused3),
        IRB.getInt1(prop.read_before_write_in_bb)}); */
-
-  return true;
 }
 
-bool ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::iterator Iter,
+void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::iterator Iter,
                                                    csi_acc_prop_t prop,
                                                    const DataLayout &DL) {
   Instruction *I = &(*Iter);
@@ -427,23 +421,19 @@ bool ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::itera
   int NumBytes = getNumBytesAccessed(Addr, DL);
   Type *AddrType = IRB.getInt8PtrTy();
 
-  if (NumBytes == -1) return false; // size that we don't recognize
-
-  bool Res = false;
+  if (NumBytes == -1) return; // size that we don't recognize
 
   if(IsWrite) {
     uint64_t LocalId = StoreFED.add(*I);
     Value *CsiId = StoreFED.localToGlobalId(LocalId, IRB);
-    Res = addLoadStoreInstrumentation(
+    addLoadStoreInstrumentation(
         Iter, CsiBeforeWrite, CsiAfterWrite, CsiId, AddrType, Addr, NumBytes, prop);
   } else { // is read
     uint64_t LocalId = LoadFED.add(*I);
     Value *CsiId = LoadFED.localToGlobalId(LocalId, IRB);
-    Res = addLoadStoreInstrumentation(
+    addLoadStoreInstrumentation(
         Iter, CsiBeforeRead, CsiAfterRead, CsiId, AddrType, Addr, NumBytes, prop);
   }
-
-  return Res;
 }
 
 // If a memset intrinsic gets inlined by the code gen, we will miss races on it.
@@ -474,7 +464,7 @@ void ComprehensiveStaticInstrumentation::instrumentMemIntrinsic(BasicBlock::iter
   }
 }
 
-bool ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
+void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   IRBuilder<> IRB(&*BB.getFirstInsertionPt());
   uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
@@ -484,7 +474,6 @@ bool ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   TerminatorInst *TI = BB.getTerminator();
   IRB.SetInsertPoint(TI);
   IRB.CreateCall(CsiBBExit, {CsiId});
-  return true;
 }
 
 void ComprehensiveStaticInstrumentation::instrumentCallsite(BasicBlock::iterator Iter) {
@@ -516,11 +505,6 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(BasicBlock::iterator
   IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId});
 }
 
-bool ComprehensiveStaticInstrumentation::doInitialization(Module &M) {
-  IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
-  return true;
-}
-
 void ComprehensiveStaticInstrumentation::initializeFEDTables(Module &M) {
   FunctionFED = FrontEndDataTable(M, CsiFunctionBaseIdName);
   FunctionExitFED = FrontEndDataTable(M, CsiFunctionExitBaseIdName);
@@ -538,6 +522,7 @@ void ComprehensiveStaticInstrumentation::InitializeCsi(Module &M) {
   initializeCallsiteCallbacks(M);
 
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
+  IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
 }
 
 // Create a struct type to match the unit_fed_entry_t type in csirt.c.
@@ -694,13 +679,13 @@ bool ComprehensiveStaticInstrumentation::runOnModule(Module &M) {
   InitializeCsi(M);
 
   for (Function &F : M)
-    runOnFunction(F);
+    instrumentFunction(F);
 
   FinalizeCsi(M);
   return true;  // we always insert the unit constructor
 }
 
-bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
+bool ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   // This is required to prevent instrumenting the call to
   // __csi_module_init from within the module constructor.
   if (F.empty() || ShouldNotInstrumentFunction(F)) {
@@ -714,7 +699,6 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
   SmallVector<BasicBlock::iterator, 8> RetVec;
   SmallVector<BasicBlock::iterator, 8> MemIntrinsics;
   SmallVector<BasicBlock::iterator, 8> Callsites;
-  bool Modified = false;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   // Traverse all instructions in a function and insert instrumentation
@@ -739,7 +723,7 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
   // Do this work in a separate loop after copying the iterators so that we
   // aren't modifying the list as we're iterating.
   for (std::pair<BasicBlock::iterator, csi_acc_prop_t> p : MemoryAccesses)
-    Modified |= instrumentLoadOrStore(p.first, p.second, DL);
+    instrumentLoadOrStore(p.first, p.second, DL);
 
   for (BasicBlock::iterator I : MemIntrinsics)
     instrumentMemIntrinsic(I);
@@ -755,7 +739,7 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
   uint64_t LocalId = FunctionFED.add(F);
   FuncOffsetMap[F.getName()] = LocalId;
   for (BasicBlock &BB : F) {
-    Modified |= instrumentBasicBlock(BB);
+    instrumentBasicBlock(BB);
   }
 
   // Instrument function entry/exit points.
@@ -771,7 +755,6 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
       Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
       IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId});
   }
-  Modified = true;
 
-  return Modified;
+  return true;
 }
