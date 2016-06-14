@@ -1,25 +1,12 @@
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
-#include "llvm/ADT/Statistic.h"
-#include "llvm/ADT/StringExtras.h" // for itostr function
 #include "llvm/Analysis/CallGraph.h"
-#include "llvm/IR/BasicBlock.h"
-#include "llvm/IR/Constants.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfo.h"
-#include "llvm/IR/DebugInfoMetadata.h"
-#include "llvm/IR/Function.h"
-#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/IntrinsicInst.h"
-#include "llvm/IR/Intrinsics.h"
-#include "llvm/IR/LLVMContext.h"
-#include "llvm/IR/InstIterator.h"
+#include "llvm/IR/IRBuilder.h"
 #include "llvm/IR/Module.h"
-#include "llvm/IR/Type.h"
-#include "llvm/Support/CommandLine.h"
-#include "llvm/Support/Debug.h"
-#include "llvm/Support/raw_ostream.h"
 #include "llvm/Transforms/Instrumentation.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
@@ -788,6 +775,3 @@ bool ComprehensiveStaticInstrumentation::runOnFunction(Function &F) {
 
   return Modified;
 }
-
-// End of compile-time pass
-// ------------------------------------------------------------------------
