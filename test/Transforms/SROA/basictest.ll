@@ -1,5 +1,5 @@
 ; RUN: opt < %s -sroa -S | FileCheck %s
-; RUN: opt < %s -sroa -force-ssa-updater -S | FileCheck %s
+; RUN: opt < %s -passes=sroa -S | FileCheck %s
 
 target datalayout = "e-p:64:64:64-p1:16:16:16-i1:8:8-i8:8:8-i16:16:16-i32:32:32-i64:32:64-f32:32:32-f64:64:64-v64:64:64-v128:128:128-a0:0:64-n8:16:32:64"
 
@@ -1610,3 +1610,62 @@ entry:
   %load = load atomic volatile i64, i64* %ptr seq_cst, align 8
   ret void
 }
+
+define i16 @PR24463() {
+; Ensure we can handle a very interesting case where there is an integer-based
+; rewrite of the uses of the alloca, but where one of the integers in that is
+; a sub-integer that requires extraction *and* extends past the end of the
+; alloca. In this case, we should extract the i8 and then zext it to i16.
+;
+; CHECK-LABEL: @PR24463(
+; CHECK-NOT: alloca
+; CHECK: %[[SHIFT:.*]] = lshr i16 0, 8
+; CHECK: %[[TRUNC:.*]] = trunc i16 %[[SHIFT]] to i8
+; CHECK: %[[ZEXT:.*]] = zext i8 %[[TRUNC]] to i16
+; CHECK: ret i16 %[[ZEXT]]
+entry:
+  %alloca = alloca [3 x i8]
+  %gep1 = getelementptr inbounds [3 x i8], [3 x i8]* %alloca, i64 0, i64 1
+  %bc1 = bitcast i8* %gep1 to i16*
+  store i16 0, i16* %bc1
+  %gep2 = getelementptr inbounds [3 x i8], [3 x i8]* %alloca, i64 0, i64 2
+  %bc2 = bitcast i8* %gep2 to i16*
+  %load = load i16, i16* %bc2
+  ret i16 %load
+}
+
+%struct.STest = type { %struct.SPos, %struct.SPos }
+%struct.SPos = type { float, float }
+
+define void @PR25873(%struct.STest* %outData) {
+; CHECK-LABEL: @PR25873(
+; CHECK: store i32 1123418112
+; CHECK: store i32 1139015680
+; CHECK: %[[HIZEXT:.*]] = zext i32 1139015680 to i64
+; CHECK: %[[HISHL:.*]] = shl i64 %[[HIZEXT]], 32
+; CHECK: %[[HIMASK:.*]] = and i64 undef, 4294967295
+; CHECK: %[[HIINSERT:.*]] = or i64 %[[HIMASK]], %[[HISHL]]
+; CHECK: %[[LOZEXT:.*]] = zext i32 1123418112 to i64
+; CHECK: %[[LOMASK:.*]] = and i64 %[[HIINSERT]], -4294967296
+; CHECK: %[[LOINSERT:.*]] = or i64 %[[LOMASK]], %[[LOZEXT]]
+; CHECK: store i64 %[[LOINSERT]]
+entry:
+  %tmpData = alloca %struct.STest, align 8
+  %0 = bitcast %struct.STest* %tmpData to i8*
+  call void @llvm.lifetime.start(i64 16, i8* %0)
+  %x = getelementptr inbounds %struct.STest, %struct.STest* %tmpData, i64 0, i32 0, i32 0
+  store float 1.230000e+02, float* %x, align 8
+  %y = getelementptr inbounds %struct.STest, %struct.STest* %tmpData, i64 0, i32 0, i32 1
+  store float 4.560000e+02, float* %y, align 4
+  %m_posB = getelementptr inbounds %struct.STest, %struct.STest* %tmpData, i64 0, i32 1
+  %1 = bitcast %struct.STest* %tmpData to i64*
+  %2 = bitcast %struct.SPos* %m_posB to i64*
+  %3 = load i64, i64* %1, align 8
+  store i64 %3, i64* %2, align 8
+  %4 = bitcast %struct.STest* %outData to i8*
+  call void @llvm.memcpy.p0i8.p0i8.i64(i8* %4, i8* %0, i64 16, i32 4, i1 false)
+  call void @llvm.lifetime.end(i64 16, i8* %0)
+  ret void
+}
+
+declare void @llvm.memcpy.p0i8.p0i8.i64(i8* nocapture, i8* nocapture, i64, i32, i1) nounwind

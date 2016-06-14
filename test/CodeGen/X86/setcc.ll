@@ -34,3 +34,47 @@ entry:
   %iftmp.2.0 = select i1 %0, i64 64, i64 0        ; <i64> [#uses=1]
   ret i64 %iftmp.2.0
 }
+
+@v4 = common global i32 0, align 4
+
+define i32 @t4(i32 %a) {
+entry:
+; CHECK-LABEL: t4:
+; CHECK:  movq    _v4@GOTPCREL(%rip), %rax
+; CHECK:  cmpl    $1, (%rax)
+; CHECK:  sbbl    %eax, %eax
+; CHECK:  andl    $32768, %eax
+; CHECK:  leal    65536(%rax,%rax), %eax
+  %0 = load i32, i32* @v4, align 4
+  %not.tobool = icmp eq i32 %0, 0
+  %conv.i = sext i1 %not.tobool to i16
+  %call.lobit = lshr i16 %conv.i, 15
+  %add.i.1 = add nuw nsw i16 %call.lobit, 1
+  %conv4.2 = zext i16 %add.i.1 to i32
+  %add = shl nuw nsw i32 %conv4.2, 16
+  ret i32 %add
+}
+
+define i8 @t5(i32 %a) #0 {
+entry:
+; CHECK-LABEL: t5:
+; CHECK:  testl   %edi, %edi
+; CHECK:  setns   %al
+  %.lobit = lshr i32 %a, 31
+  %trunc = trunc i32 %.lobit to i8
+  %.not = xor i8 %trunc, 1
+  ret i8 %.not
+}
+
+define zeroext i1 @t6(i32 %a) #0 {
+entry:
+; CHECK-LABEL: t6:
+; CHECK:  testl   %edi, %edi
+; CHECK:  setns   %al
+  %.lobit = lshr i32 %a, 31
+  %trunc = trunc i32 %.lobit to i1
+  %.not = xor i1 %trunc, 1
+  ret i1 %.not
+}
+
+attributes #0 = { "target-cpu"="skylake-avx512" }

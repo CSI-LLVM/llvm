@@ -17,7 +17,6 @@
 #ifndef LLVM_ADT_STLEXTRAS_H
 #define LLVM_ADT_STLEXTRAS_H
 
-#include "llvm/Support/Compiler.h"
 #include <algorithm> // for std::all_of
 #include <cassert>
 #include <cstddef> // for std::size_t
@@ -26,6 +25,9 @@
 #include <iterator>
 #include <memory>
 #include <utility> // for std::pair
+
+#include "llvm/ADT/iterator_range.h"
+#include "llvm/Support/Compiler.h"
 
 namespace llvm {
 
@@ -117,7 +119,9 @@ public:
           iterator_category;
   typedef typename std::iterator_traits<RootIt>::difference_type
           difference_type;
-  typedef typename UnaryFunc::result_type value_type;
+  typedef typename std::result_of<
+            UnaryFunc(decltype(*std::declval<RootIt>()))>
+          ::type value_type;
 
   typedef void pointer;
   //typedef typename UnaryFunc::result_type *pointer;
@@ -194,6 +198,41 @@ operator+(typename mapped_iterator<Iterator, Func>::difference_type N,
 template <class ItTy, class FuncTy>
 inline mapped_iterator<ItTy, FuncTy> map_iterator(const ItTy &I, FuncTy F) {
   return mapped_iterator<ItTy, FuncTy>(I, F);
+}
+
+/// \brief Metafunction to determine if type T has a member called rbegin().
+template <typename T> struct has_rbegin {
+  template <typename U> static char(&f(const U &, decltype(&U::rbegin)))[1];
+  static char(&f(...))[2];
+  const static bool value = sizeof(f(std::declval<T>(), nullptr)) == 1;
+};
+
+// Returns an iterator_range over the given container which iterates in reverse.
+// Note that the container must have rbegin()/rend() methods for this to work.
+template <typename ContainerTy>
+auto reverse(ContainerTy &&C,
+             typename std::enable_if<has_rbegin<ContainerTy>::value>::type * =
+                 nullptr) -> decltype(make_range(C.rbegin(), C.rend())) {
+  return make_range(C.rbegin(), C.rend());
+}
+
+// Returns a std::reverse_iterator wrapped around the given iterator.
+template <typename IteratorTy>
+std::reverse_iterator<IteratorTy> make_reverse_iterator(IteratorTy It) {
+  return std::reverse_iterator<IteratorTy>(It);
+}
+
+// Returns an iterator_range over the given container which iterates in reverse.
+// Note that the container must have begin()/end() methods which return
+// bidirectional iterators for this to work.
+template <typename ContainerTy>
+auto reverse(
+    ContainerTy &&C,
+    typename std::enable_if<!has_rbegin<ContainerTy>::value>::type * = nullptr)
+    -> decltype(make_range(llvm::make_reverse_iterator(std::end(C)),
+                           llvm::make_reverse_iterator(std::begin(C)))) {
+  return make_range(llvm::make_reverse_iterator(std::end(C)),
+                    llvm::make_reverse_iterator(std::begin(C)));
 }
 
 //===----------------------------------------------------------------------===//
@@ -329,11 +368,63 @@ void DeleteContainerSeconds(Container &C) {
 }
 
 /// Provide wrappers to std::all_of which take ranges instead of having to pass
-/// being/end explicitly.
+/// begin/end explicitly.
 template<typename R, class UnaryPredicate>
 bool all_of(R &&Range, UnaryPredicate &&P) {
   return std::all_of(Range.begin(), Range.end(),
                      std::forward<UnaryPredicate>(P));
+}
+
+/// Provide wrappers to std::any_of which take ranges instead of having to pass
+/// begin/end explicitly.
+template <typename R, class UnaryPredicate>
+bool any_of(R &&Range, UnaryPredicate &&P) {
+  return std::any_of(Range.begin(), Range.end(),
+                     std::forward<UnaryPredicate>(P));
+}
+
+/// Provide wrappers to std::none_of which take ranges instead of having to pass
+/// begin/end explicitly.
+template <typename R, class UnaryPredicate>
+bool none_of(R &&Range, UnaryPredicate &&P) {
+  return std::none_of(Range.begin(), Range.end(),
+                      std::forward<UnaryPredicate>(P));
+}
+
+/// Provide wrappers to std::find which take ranges instead of having to pass
+/// begin/end explicitly.
+template<typename R, class T>
+auto find(R &&Range, const T &val) -> decltype(Range.begin()) {
+  return std::find(Range.begin(), Range.end(), val);
+}
+
+/// Provide wrappers to std::find_if which take ranges instead of having to pass
+/// begin/end explicitly.
+template <typename R, class T>
+auto find_if(R &&Range, const T &Pred) -> decltype(Range.begin()) {
+  return std::find_if(Range.begin(), Range.end(), Pred);
+}
+
+/// Provide wrappers to std::remove_if which take ranges instead of having to
+/// pass begin/end explicitly.
+template<typename R, class UnaryPredicate>
+auto remove_if(R &&Range, UnaryPredicate &&P) -> decltype(Range.begin()) {
+  return std::remove_if(Range.begin(), Range.end(), P);
+}
+
+/// Wrapper function around std::find to detect if an element exists
+/// in a container.
+template <typename R, typename E>
+bool is_contained(R &&Range, const E &Element) {
+  return std::find(Range.begin(), Range.end(), Element) != Range.end();
+}
+
+/// Wrapper function around std::count_if to count the number of times an
+/// element satisfying a given predicate occurs in a range.
+template <typename R, typename UnaryPredicate>
+auto count_if(R &&Range, UnaryPredicate &&P)
+    -> typename std::iterator_traits<decltype(Range.begin())>::difference_type {
+  return std::count_if(Range.begin(), Range.end(), P);
 }
 
 //===----------------------------------------------------------------------===//

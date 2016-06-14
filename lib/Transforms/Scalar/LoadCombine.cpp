@@ -16,6 +16,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Analysis/AliasAnalysis.h"
 #include "llvm/Analysis/AliasSetTracker.h"
+#include "llvm/Analysis/GlobalsModRef.h"
 #include "llvm/Analysis/TargetFolder.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/Function.h"
@@ -33,6 +34,8 @@ using namespace llvm;
 
 STATISTIC(NumLoadsAnalyzed, "Number of loads analyzed for combining");
 STATISTIC(NumLoadsCombined, "Number of loads combined");
+
+#define LDCOMBINE_NAME "Combine Adjacent Loads"
 
 namespace {
 struct PointerOffsetPair {
@@ -56,18 +59,22 @@ class LoadCombine : public BasicBlockPass {
 
 public:
   LoadCombine() : BasicBlockPass(ID), C(nullptr), AA(nullptr) {
-    initializeSROAPass(*PassRegistry::getPassRegistry());
+    initializeLoadCombinePass(*PassRegistry::getPassRegistry());
   }
   
   using llvm::Pass::doInitialization;
   bool doInitialization(Function &) override;
   bool runOnBasicBlock(BasicBlock &BB) override;
-  void getAnalysisUsage(AnalysisUsage &AU) const override;
+  void getAnalysisUsage(AnalysisUsage &AU) const override {
+    AU.setPreservesCFG();
+    AU.addRequired<AAResultsWrapperPass>();
+    AU.addPreserved<GlobalsAAWrapperPass>();
+  }
 
-  const char *getPassName() const override { return "LoadCombine"; }
+  const char *getPassName() const override { return LDCOMBINE_NAME; }
   static char ID;
 
-  typedef IRBuilder<true, TargetFolder> BuilderTy;
+  typedef IRBuilder<TargetFolder> BuilderTy;
 
 private:
   BuilderTy *Builder;
@@ -220,12 +227,12 @@ bool LoadCombine::combineLoads(SmallVectorImpl<LoadPOPPair> &Loads) {
 }
 
 bool LoadCombine::runOnBasicBlock(BasicBlock &BB) {
-  if (skipOptnoneFunction(BB))
+  if (skipBasicBlock(BB))
     return false;
 
-  AA = &getAnalysis<AliasAnalysis>();
+  AA = &getAnalysis<AAResultsWrapperPass>().getAAResults();
 
-  IRBuilder<true, TargetFolder> TheBuilder(
+  IRBuilder<TargetFolder> TheBuilder(
       BB.getContext(), TargetFolder(BB.getModule()->getDataLayout()));
   Builder = &TheBuilder;
 
@@ -259,22 +266,12 @@ bool LoadCombine::runOnBasicBlock(BasicBlock &BB) {
   return Combined;
 }
 
-void LoadCombine::getAnalysisUsage(AnalysisUsage &AU) const {
-  AU.setPreservesCFG();
-
-  AU.addRequired<AliasAnalysis>();
-  AU.addPreserved<AliasAnalysis>();
-}
-
 char LoadCombine::ID = 0;
 
 BasicBlockPass *llvm::createLoadCombinePass() {
   return new LoadCombine();
 }
 
-INITIALIZE_PASS_BEGIN(LoadCombine, "load-combine", "Combine Adjacent Loads",
-                      false, false)
-INITIALIZE_AG_DEPENDENCY(AliasAnalysis)
-INITIALIZE_PASS_END(LoadCombine, "load-combine", "Combine Adjacent Loads",
-                    false, false)
-
+INITIALIZE_PASS_BEGIN(LoadCombine, "load-combine", LDCOMBINE_NAME, false, false)
+INITIALIZE_PASS_DEPENDENCY(AAResultsWrapperPass)
+INITIALIZE_PASS_END(LoadCombine, "load-combine", LDCOMBINE_NAME, false, false)

@@ -117,7 +117,7 @@ void NVPTXAsmPrinter::emitLineNumberAsDotLoc(const MachineInstr &MI) {
   if (ignoreLoc(MI))
     return;
 
-  DebugLoc curLoc = MI.getDebugLoc();
+  const DebugLoc &curLoc = MI.getDebugLoc();
 
   if (!prevDebugLoc && !curLoc)
     return;
@@ -277,7 +277,7 @@ bool NVPTXAsmPrinter::lowerOperand(const MachineOperand &MO,
     break;
   case MachineOperand::MO_FPImmediate: {
     const ConstantFP *Cnt = MO.getFPImm();
-    APFloat Val = Cnt->getValueAPF();
+    const APFloat &Val = Cnt->getValueAPF();
 
     switch (Cnt->getType()->getTypeID()) {
     default: report_fatal_error("Unsupported FP type"); break;
@@ -355,7 +355,7 @@ void NVPTXAsmPrinter::printReturnValStr(const Function *F, raw_ostream &O) {
   if (isABI) {
     if (Ty->isFloatingPointTy() || Ty->isIntegerTy()) {
       unsigned size = 0;
-      if (const IntegerType *ITy = dyn_cast<IntegerType>(Ty)) {
+      if (auto *ITy = dyn_cast<IntegerType>(Ty)) {
         size = ITy->getBitWidth();
         if (size < 32)
           size = 32;
@@ -432,7 +432,8 @@ bool NVPTXAsmPrinter::isLoopHeaderOfNoUnroll(
       continue;
     }
     if (const BasicBlock *PBB = PMBB->getBasicBlock()) {
-      if (MDNode *LoopID = PBB->getTerminator()->getMetadata("llvm.loop")) {
+      if (MDNode *LoopID =
+              PBB->getTerminator()->getMetadata(LLVMContext::MD_loop)) {
         if (GetUnrollMetadata(LoopID, "llvm.loop.unroll.disable"))
           return true;
       }
@@ -635,9 +636,7 @@ static bool usedInGlobalVarDef(const Constant *C) {
     return false;
 
   if (const GlobalVariable *GV = dyn_cast<GlobalVariable>(C)) {
-    if (GV->getName() == "llvm.used")
-      return false;
-    return true;
+    return GV->getName() != "llvm.used";
   }
 
   for (const User *U : C->users())
@@ -682,7 +681,7 @@ static bool usedInOneFunc(const User *U, Function const *&oneFunc) {
 static bool canDemoteGlobalVar(const GlobalVariable *gv, Function const *&f) {
   if (!gv->hasInternalLinkage())
     return false;
-  const PointerType *Pty = gv->getType();
+  PointerType *Pty = gv->getType();
   if (Pty->getAddressSpace() != llvm::ADDRESS_SPACE_SHARED)
     return false;
 
@@ -720,7 +719,7 @@ static bool useFuncSeen(const Constant *C,
 void NVPTXAsmPrinter::emitDeclarations(const Module &M, raw_ostream &O) {
   llvm::DenseMap<const Function *, bool> seenMap;
   for (Module::const_iterator FI = M.begin(), FE = M.end(); FI != FE; ++FI) {
-    const Function *F = FI;
+    const Function *F = &*FI;
 
     if (F->isDeclaration()) {
       if (F->use_empty())
@@ -800,8 +799,16 @@ void NVPTXAsmPrinter::recordAndEmitFilenames(Module &M) {
     if (filenameMap.find(Filename) != filenameMap.end())
       continue;
     filenameMap[Filename] = i;
+    OutStreamer->EmitDwarfFileDirective(i, "", Filename);
     ++i;
   }
+}
+
+static bool isEmptyXXStructor(GlobalVariable *GV) {
+  if (!GV) return true;
+  const ConstantArray *InitList = dyn_cast<ConstantArray>(GV->getInitializer());
+  if (!InitList) return true;  // Not an array; we don't know how to parse.
+  return InitList->getNumOperands() == 0;
 }
 
 bool NVPTXAsmPrinter::doInitialization(Module &M) {
@@ -813,6 +820,21 @@ bool NVPTXAsmPrinter::doInitialization(Module &M) {
   StringRef FS = TM.getTargetFeatureString();
   const NVPTXTargetMachine &NTM = static_cast<const NVPTXTargetMachine &>(TM);
   const NVPTXSubtarget STI(TT, CPU, FS, NTM);
+
+  if (M.alias_size()) {
+    report_fatal_error("Module has aliases, which NVPTX does not support.");
+    return true; // error
+  }
+  if (!isEmptyXXStructor(M.getNamedGlobal("llvm.global_ctors"))) {
+    report_fatal_error(
+        "Module has a nontrivial global ctor, which NVPTX does not support.");
+    return true;  // error
+  }
+  if (!isEmptyXXStructor(M.getNamedGlobal("llvm.global_dtors"))) {
+    report_fatal_error(
+        "Module has a nontrivial global dtor, which NVPTX does not support.");
+    return true;  // error
+  }
 
   SmallString<128> Str1;
   raw_svector_ostream OS1(Str1);
@@ -870,9 +892,8 @@ void NVPTXAsmPrinter::emitGlobals(const Module &M) {
   DenseSet<const GlobalVariable *> GVVisiting;
 
   // Visit each global variable, in order
-  for (Module::const_global_iterator I = M.global_begin(), E = M.global_end();
-       I != E; ++I)
-    VisitGlobalVariableForEmission(I, Globals, GVVisited, GVVisiting);
+  for (const GlobalVariable &I : M.globals())
+    VisitGlobalVariableForEmission(&I, Globals, GVVisited, GVVisiting);
 
   assert(GVVisited.size() == M.getGlobalList().size() &&
          "Missed a global variable");
@@ -1020,7 +1041,7 @@ void NVPTXAsmPrinter::printModuleLevelGV(const GlobalVariable *GVar,
 
   // Skip meta data
   if (GVar->hasSection()) {
-    if (GVar->getSection() == StringRef("llvm.metadata"))
+    if (GVar->getSection() == "llvm.metadata")
       return;
   }
 
@@ -1032,8 +1053,8 @@ void NVPTXAsmPrinter::printModuleLevelGV(const GlobalVariable *GVar,
   const DataLayout &DL = getDataLayout();
 
   // GlobalVariables are always constant pointers themselves.
-  const PointerType *PTy = GVar->getType();
-  Type *ETy = PTy->getElementType();
+  PointerType *PTy = GVar->getType();
+  Type *ETy = GVar->getValueType();
 
   if (GVar->hasExternalLinkage()) {
     if (GVar->hasInitializer())
@@ -1185,9 +1206,11 @@ void NVPTXAsmPrinter::printModuleLevelGV(const GlobalVariable *GVar,
           printScalarConstant(Initializer, O);
         }
       } else {
-        // The frontend adds zero-initializer to variables that don't have an
-        // initial value, so skip warning for this case.
-        if (!GVar->getInitializer()->isNullValue()) {
+        // The frontend adds zero-initializer to device and constant variables
+        // that don't have an initial value, and UndefValue to shared
+        // variables, so skip warning for this case.
+        if (!GVar->getInitializer()->isNullValue() &&
+            !isa<UndefValue>(GVar->getInitializer())) {
           report_fatal_error("initial value of '" + GVar->getName() +
                              "' is not allowed in addrspace(" +
                              Twine(PTy->getAddressSpace()) + ")");
@@ -1299,7 +1322,7 @@ void NVPTXAsmPrinter::emitPTXAddressSpace(unsigned int AddressSpace,
 }
 
 std::string
-NVPTXAsmPrinter::getPTXFundamentalTypeStr(const Type *Ty, bool useB4PTR) const {
+NVPTXAsmPrinter::getPTXFundamentalTypeStr(Type *Ty, bool useB4PTR) const {
   switch (Ty->getTypeID()) {
   default:
     llvm_unreachable("unexpected type");
@@ -1342,11 +1365,10 @@ void NVPTXAsmPrinter::emitPTXGlobalVariable(const GlobalVariable *GVar,
   const DataLayout &DL = getDataLayout();
 
   // GlobalVariables are always constant pointers themselves.
-  const PointerType *PTy = GVar->getType();
-  Type *ETy = PTy->getElementType();
+  Type *ETy = GVar->getValueType();
 
   O << ".";
-  emitPTXAddressSpace(PTy->getAddressSpace(), O);
+  emitPTXAddressSpace(GVar->getType()->getAddressSpace(), O);
   if (GVar->getAlignment() == 0)
     O << " .align " << (int)DL.getPrefTypeAlignment(ETy);
   else
@@ -1389,11 +1411,11 @@ static unsigned int getOpenCLAlignment(const DataLayout &DL, Type *Ty) {
   if (Ty->isSingleValueType())
     return DL.getPrefTypeAlignment(Ty);
 
-  const ArrayType *ATy = dyn_cast<ArrayType>(Ty);
+  auto *ATy = dyn_cast<ArrayType>(Ty);
   if (ATy)
     return getOpenCLAlignment(DL, ATy->getElementType());
 
-  const StructType *STy = dyn_cast<StructType>(Ty);
+  auto *STy = dyn_cast<StructType>(Ty);
   if (STy) {
     unsigned int alignStruct = 1;
     // Go through each element of the struct and find the
@@ -1407,7 +1429,7 @@ static unsigned int getOpenCLAlignment(const DataLayout &DL, Type *Ty) {
     return alignStruct;
   }
 
-  const FunctionType *FTy = dyn_cast<FunctionType>(Ty);
+  auto *FTy = dyn_cast<FunctionType>(Ty);
   if (FTy)
     return DL.getPointerPrefAlignment();
   return DL.getPrefTypeAlignment(Ty);
@@ -1416,11 +1438,6 @@ static unsigned int getOpenCLAlignment(const DataLayout &DL, Type *Ty) {
 void NVPTXAsmPrinter::printParamName(Function::const_arg_iterator I,
                                      int paramIndex, raw_ostream &O) {
   getSymbol(I->getParent())->print(O, MAI);
-  O << "_param_" << paramIndex;
-}
-
-void NVPTXAsmPrinter::printParamName(int paramIndex, raw_ostream &O) {
-  CurrentFnSym->print(O, MAI);
   O << "_param_" << paramIndex;
 }
 
@@ -1434,6 +1451,11 @@ void NVPTXAsmPrinter::emitFunctionParamList(const Function *F, raw_ostream &O) {
   bool isKernelFunc = llvm::isKernelFunction(*F);
   bool isABI = (nvptxSubtarget->getSmVersion() >= 20);
   MVT thePointerTy = TLI->getPointerTy(DL);
+
+  if (F->arg_empty()) {
+    O << "()\n";
+    return;
+  }
 
   O << "(\n";
 
@@ -1495,7 +1517,7 @@ void NVPTXAsmPrinter::emitFunctionParamList(const Function *F, raw_ostream &O) {
         continue;
       }
       // Just a scalar
-      const PointerType *PTy = dyn_cast<PointerType>(Ty);
+      auto *PTy = dyn_cast<PointerType>(Ty);
       if (isKernelFunc) {
         if (PTy) {
           // Special handling for pointer arguments to kernel
@@ -1556,7 +1578,7 @@ void NVPTXAsmPrinter::emitFunctionParamList(const Function *F, raw_ostream &O) {
     }
 
     // param has byVal attribute. So should be a pointer
-    const PointerType *PTy = dyn_cast<PointerType>(Ty);
+    auto *PTy = dyn_cast<PointerType>(Ty);
     assert(PTy && "Param with byval attribute should be a pointer type");
     Type *ETy = PTy->getElementType();
 
@@ -1721,9 +1743,8 @@ void NVPTXAsmPrinter::printScalarConstant(const Constant *CPV, raw_ostream &O) {
     return;
   }
   if (const GlobalValue *GVar = dyn_cast<GlobalValue>(CPV)) {
-    PointerType *PTy = dyn_cast<PointerType>(GVar->getType());
     bool IsNonGenericPointer = false;
-    if (PTy && PTy->getAddressSpace() != 0) {
+    if (GVar->getType()->getAddressSpace() != 0) {
       IsNonGenericPointer = true;
     }
     if (EmitGeneric && !isa<Function>(CPV) && !IsNonGenericPointer) {
@@ -1800,7 +1821,7 @@ void NVPTXAsmPrinter::bufferLEByte(const Constant *CPV, int Bytes,
   switch (CPV->getType()->getTypeID()) {
 
   case Type::IntegerTyID: {
-    const Type *ETy = CPV->getType();
+    Type *ETy = CPV->getType();
     if (ETy == Type::getInt8Ty(CPV->getContext())) {
       unsigned char c = (unsigned char)cast<ConstantInt>(CPV)->getZExtValue();
       ConvertIntToBytes<>(ptr, c);
@@ -1860,7 +1881,7 @@ void NVPTXAsmPrinter::bufferLEByte(const Constant *CPV, int Bytes,
   case Type::FloatTyID:
   case Type::DoubleTyID: {
     const ConstantFP *CFP = dyn_cast<ConstantFP>(CPV);
-    const Type *Ty = CFP->getType();
+    Type *Ty = CFP->getType();
     if (Ty == Type::getFloatTy(CPV->getContext())) {
       float float32 = (float) CFP->getValueAPF().convertToFloat();
       ConvertFloatToBytes(ptr, float32);
@@ -1889,8 +1910,7 @@ void NVPTXAsmPrinter::bufferLEByte(const Constant *CPV, int Bytes,
   case Type::ArrayTyID:
   case Type::VectorTyID:
   case Type::StructTyID: {
-    if (isa<ConstantArray>(CPV) || isa<ConstantVector>(CPV) ||
-        isa<ConstantStruct>(CPV) || isa<ConstantDataSequential>(CPV)) {
+    if (isa<ConstantAggregate>(CPV) || isa<ConstantDataSequential>(CPV)) {
       int ElementSize = DL.getTypeAllocSize(CPV->getType());
       bufferAggregateConstant(CPV, aggBuffer);
       if (Bytes > ElementSize)
@@ -1950,18 +1970,6 @@ void NVPTXAsmPrinter::bufferAggregateConstant(const Constant *CPV,
 
 // buildTypeNameMap - Run through symbol table looking for type names.
 //
-
-bool NVPTXAsmPrinter::isImageType(const Type *Ty) {
-
-  std::map<const Type *, std::string>::iterator PI = TypeNameMap.find(Ty);
-
-  if (PI != TypeNameMap.end() && (!PI->second.compare("struct._image1d_t") ||
-                                  !PI->second.compare("struct._image2d_t") ||
-                                  !PI->second.compare("struct._image3d_t")))
-    return true;
-
-  return false;
-}
 
 
 bool NVPTXAsmPrinter::ignoreLoc(const MachineInstr &MI) {
@@ -2333,7 +2341,7 @@ void NVPTXAsmPrinter::emitSrcInText(StringRef filename, unsigned line) {
   this->OutStreamer->EmitRawText(temp.str());
 }
 
-LineReader *NVPTXAsmPrinter::getReader(std::string filename) {
+LineReader *NVPTXAsmPrinter::getReader(const std::string &filename) {
   if (!reader) {
     reader = new LineReader(filename);
   }

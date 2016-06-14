@@ -91,6 +91,8 @@ int llvm::getNextAvailablePluginDiagnosticKind() {
   return ++PluginKindID;
 }
 
+const char *DiagnosticInfo::AlwaysPrint = "";
+
 DiagnosticInfoInlineAsm::DiagnosticInfoInlineAsm(const Instruction &I,
                                                  const Twine &MsgStr,
                                                  DiagnosticSeverity Severity)
@@ -120,19 +122,32 @@ void DiagnosticInfoDebugMetadataVersion::print(DiagnosticPrinter &DP) const {
      << ") in " << getModule();
 }
 
+void DiagnosticInfoIgnoringInvalidDebugMetadata::print(
+    DiagnosticPrinter &DP) const {
+  DP << "ignoring invalid debug info in " << getModule().getModuleIdentifier();
+}
+
 void DiagnosticInfoSampleProfile::print(DiagnosticPrinter &DP) const {
-  if (getFileName() && getLineNum() > 0)
-    DP << getFileName() << ":" << getLineNum() << ": ";
-  else if (getFileName())
+  if (!FileName.empty()) {
+    DP << getFileName();
+    if (LineNum > 0)
+      DP << ":" << getLineNum();
+    DP << ": ";
+  }
+  DP << getMsg();
+}
+
+void DiagnosticInfoPGOProfile::print(DiagnosticPrinter &DP) const {
+  if (getFileName())
     DP << getFileName() << ": ";
   DP << getMsg();
 }
 
-bool DiagnosticInfoOptimizationBase::isLocationAvailable() const {
+bool DiagnosticInfoWithDebugLocBase::isLocationAvailable() const {
   return getDebugLoc();
 }
 
-void DiagnosticInfoOptimizationBase::getLocation(StringRef *Filename,
+void DiagnosticInfoWithDebugLocBase::getLocation(StringRef *Filename,
                                                  unsigned *Line,
                                                  unsigned *Column) const {
   DILocation *L = getDebugLoc();
@@ -142,7 +157,7 @@ void DiagnosticInfoOptimizationBase::getLocation(StringRef *Filename,
   *Column = L->getColumn();
 }
 
-const std::string DiagnosticInfoOptimizationBase::getLocationStr() const {
+const std::string DiagnosticInfoWithDebugLocBase::getLocationStr() const {
   StringRef Filename("<unknown>");
   unsigned Line = 0;
   unsigned Column = 0;
@@ -166,8 +181,9 @@ bool DiagnosticInfoOptimizationRemarkMissed::isEnabled() const {
 }
 
 bool DiagnosticInfoOptimizationRemarkAnalysis::isEnabled() const {
-  return PassRemarksAnalysisOptLoc.Pattern &&
-         PassRemarksAnalysisOptLoc.Pattern->match(getPassName());
+  return getPassName() == DiagnosticInfo::AlwaysPrint ||
+         (PassRemarksAnalysisOptLoc.Pattern &&
+          PassRemarksAnalysisOptLoc.Pattern->match(getPassName()));
 }
 
 void DiagnosticInfoMIRParser::print(DiagnosticPrinter &DP) const {
@@ -196,9 +212,37 @@ void llvm::emitOptimizationRemarkAnalysis(LLVMContext &Ctx,
       DiagnosticInfoOptimizationRemarkAnalysis(PassName, Fn, DLoc, Msg));
 }
 
+void llvm::emitOptimizationRemarkAnalysisFPCommute(LLVMContext &Ctx,
+                                                   const char *PassName,
+                                                   const Function &Fn,
+                                                   const DebugLoc &DLoc,
+                                                   const Twine &Msg) {
+  Ctx.diagnose(DiagnosticInfoOptimizationRemarkAnalysisFPCommute(PassName, Fn,
+                                                                 DLoc, Msg));
+}
+
+void llvm::emitOptimizationRemarkAnalysisAliasing(LLVMContext &Ctx,
+                                                  const char *PassName,
+                                                  const Function &Fn,
+                                                  const DebugLoc &DLoc,
+                                                  const Twine &Msg) {
+  Ctx.diagnose(DiagnosticInfoOptimizationRemarkAnalysisAliasing(PassName, Fn,
+                                                                DLoc, Msg));
+}
+
 bool DiagnosticInfoOptimizationFailure::isEnabled() const {
   // Only print warnings.
   return getSeverity() == DS_Warning;
+}
+
+void DiagnosticInfoUnsupported::print(DiagnosticPrinter &DP) const {
+  std::string Str;
+  raw_string_ostream OS(Str);
+
+  OS << getLocationStr() << ": in function " << getFunction().getName() << ' '
+     << *getFunction().getFunctionType() << ": " << Msg << '\n';
+  OS.flush();
+  DP << Str;
 }
 
 void llvm::emitLoopVectorizeWarning(LLVMContext &Ctx, const Function &Fn,

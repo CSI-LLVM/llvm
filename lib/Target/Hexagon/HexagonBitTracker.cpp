@@ -84,6 +84,8 @@ BT::BitMask HexagonEvaluator::mask(unsigned Reg, unsigned Sub) const {
   uint16_t RW = getRegBitWidth(RegisterRef(Reg, Sub));
   switch (ID) {
     case DoubleRegsRegClassID:
+    case VecDblRegsRegClassID:
+    case VecDblRegs128BRegClassID:
       return (Sub == subreg_loreg) ? BT::BitMask(0, RW-1)
                                    : BT::BitMask(RW, 2*RW-1);
     default:
@@ -188,7 +190,7 @@ bool HexagonEvaluator::evaluate(const MachineInstr *MI,
     return true;
   };
   // Get the cell corresponding to the N-th operand.
-  auto cop = [this,Reg,MI,Inputs] (unsigned N, uint16_t W)
+  auto cop = [this,&Reg,&MI,&Inputs] (unsigned N, uint16_t W)
         -> BT::RegisterCell {
     const MachineOperand &Op = MI->getOperand(N);
     if (Op.isImm())
@@ -935,7 +937,7 @@ bool HexagonEvaluator::evaluate(const MachineInstr *BI,
 
 bool HexagonEvaluator::evaluateLoad(const MachineInstr *MI,
       const CellMapType &Inputs, CellMapType &Outputs) const {
-  if (TII.isPredicated(MI))
+  if (TII.isPredicated(*MI))
     return false;
   assert(MI->mayLoad() && "A load that mayn't?");
   unsigned Opc = MI->getOpcode();

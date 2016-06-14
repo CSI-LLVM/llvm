@@ -40,6 +40,15 @@ class CF_MEM_RAT <bits<6> rat_inst, bits<4> rat_id, dag ins, string name,
     : EG_CF_RAT <0x56, rat_inst, rat_id, 0xf /* mask */, (outs), ins,
                  "MEM_RAT "#name, pattern>;
 
+class CF_MEM_RAT_STORE_TYPED<bits<1> has_eop>
+    : CF_MEM_RAT <0x1, ?, (ins R600_Reg128:$rw_gpr, R600_Reg128:$index_gpr,
+                           i32imm:$rat_id, InstFlag:$eop),
+                  "STORE_TYPED RAT($rat_id) $rw_gpr, $index_gpr"
+                               #!if(has_eop, ", $eop", ""),
+                  [(int_r600_rat_store_typed R600_Reg128:$rw_gpr,
+                                             R600_Reg128:$index_gpr,
+                                             (i32 imm:$rat_id))]>;
+
 def RAT_MSKOR : CF_MEM_RAT <0x11, 0,
   (ins R600_Reg128:$rw_gpr, R600_TReg32_X:$index_gpr),
   "MSKOR $rw_gpr.XW, $index_gpr",
@@ -76,8 +85,6 @@ def COS_eg : COS_Common<0x8E>;
 def : POW_Common <LOG_IEEE_eg, EXP_IEEE_eg, MUL>;
 def : Pat<(fsqrt f32:$src), (MUL $src, (RECIPSQRT_CLAMPED_eg $src))>;
 
-defm : Expand24IBitOps<MULLO_INT_eg, ADD_INT>;
-
 //===----------------------------------------------------------------------===//
 // Memory read/write instructions
 //===----------------------------------------------------------------------===//
@@ -104,6 +111,8 @@ def RAT_WRITE_CACHELESS_128_eg : CF_MEM_RAT_CACHELESS <0x2, 0, 0xf,
   "STORE_RAW $rw_gpr.XYZW, $index_gpr, $eop",
   [(global_store v4i32:$rw_gpr, i32:$index_gpr)]
 >;
+
+def RAT_STORE_TYPED_eg: CF_MEM_RAT_STORE_TYPED<1>;
 
 } // End usesCustomInserter = 1
 
@@ -230,6 +239,7 @@ def VTX_READ_GLOBAL_8_eg : VTX_READ_8_eg <1,
   [(set i32:$dst_gpr, (az_extloadi8_global ADDRVTX_READ:$src_gpr))]
 >;
 
+// 16-bit reads
 def VTX_READ_GLOBAL_16_eg : VTX_READ_16_eg <1,
   [(set i32:$dst_gpr, (az_extloadi16_global ADDRVTX_READ:$src_gpr))]
 >;
@@ -247,6 +257,31 @@ def VTX_READ_GLOBAL_64_eg : VTX_READ_64_eg <1,
 // 128-bit reads
 def VTX_READ_GLOBAL_128_eg : VTX_READ_128_eg <1,
   [(set v4i32:$dst_gpr, (global_load ADDRVTX_READ:$src_gpr))]
+>;
+
+// 8-bit reads
+def VTX_READ_CONSTANT_8_eg : VTX_READ_8_eg <2,
+  [(set i32:$dst_gpr, (az_extloadi8_constant ADDRVTX_READ:$src_gpr))]
+>;
+
+// 16-bit reads
+def VTX_READ_CONSTANT_16_eg : VTX_READ_16_eg <2,
+  [(set i32:$dst_gpr, (az_extloadi16_constant ADDRVTX_READ:$src_gpr))]
+>;
+
+// 32-bit reads
+def VTX_READ_CONSTANT_32_eg : VTX_READ_32_eg <2,
+  [(set i32:$dst_gpr, (constant_load ADDRVTX_READ:$src_gpr))]
+>;
+
+// 64-bit reads
+def VTX_READ_CONSTANT_64_eg : VTX_READ_64_eg <2,
+  [(set v2i32:$dst_gpr, (constant_load ADDRVTX_READ:$src_gpr))]
+>;
+
+// 128-bit reads
+def VTX_READ_CONSTANT_128_eg : VTX_READ_128_eg <2,
+  [(set v4i32:$dst_gpr, (constant_load ADDRVTX_READ:$src_gpr))]
 >;
 
 } // End Predicates = [isEG]
@@ -338,14 +373,12 @@ def BCNT_INT : R600_1OP_Helper <0xAA, "BCNT_INT", ctpop, VecALU>;
 def ADDC_UINT : R600_2OP_Helper <0x52, "ADDC_UINT", AMDGPUcarry>;
 def SUBB_UINT : R600_2OP_Helper <0x53, "SUBB_UINT", AMDGPUborrow>;
 
-def FFBH_UINT : R600_1OP_Helper <0xAB, "FFBH_UINT", ctlz_zero_undef, VecALU>;
+def FFBH_UINT : R600_1OP_Helper <0xAB, "FFBH_UINT", AMDGPUffbh_u32, VecALU>;
 def FFBL_INT : R600_1OP_Helper <0xAC, "FFBL_INT", cttz_zero_undef, VecALU>;
 
 let hasSideEffects = 1 in {
   def MOVA_INT_eg : R600_1OP <0xCC, "MOVA_INT", [], VecALU>;
 }
-
-def TGSI_LIT_Z_eg : TGSI_LIT_Z_Common<MUL_LIT_eg, LOG_CLAMPED_eg, EXP_IEEE_eg>;
 
 def FLT_TO_INT_eg : FLT_TO_INT_Common<0x50> {
   let Pattern = [];

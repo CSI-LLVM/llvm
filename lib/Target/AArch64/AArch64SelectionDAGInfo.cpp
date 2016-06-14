@@ -17,7 +17,7 @@ using namespace llvm;
 #define DEBUG_TYPE "aarch64-selectiondag-info"
 
 SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemset(
-    SelectionDAG &DAG, SDLoc dl, SDValue Chain, SDValue Dst, SDValue Src,
+    SelectionDAG &DAG, const SDLoc &dl, SDValue Chain, SDValue Dst, SDValue Src,
     SDValue Size, unsigned Align, bool isVolatile,
     MachinePointerInfo DstPtrInfo) const {
   // Check to see if there is a specialized entry-point for memory zeroing.
@@ -50,4 +50,10 @@ SDValue AArch64SelectionDAGInfo::EmitTargetCodeForMemset(
     return CallResult.second;
   }
   return SDValue();
+}
+bool AArch64SelectionDAGInfo::generateFMAsInMachineCombiner(
+    CodeGenOpt::Level OptLevel) const {
+  if (OptLevel >= CodeGenOpt::Aggressive)
+    return true;
+  return false;
 }

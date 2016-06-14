@@ -23,8 +23,9 @@ public:
   explicit Mips16DAGToDAGISel(MipsTargetMachine &TM) : MipsDAGToDAGISel(TM) {}
 
 private:
-  std::pair<SDNode*, SDNode*> selectMULT(SDNode *N, unsigned Opc, SDLoc DL,
-                                         EVT Ty, bool HasLo, bool HasHi);
+  std::pair<SDNode *, SDNode *> selectMULT(SDNode *N, unsigned Opc,
+                                           const SDLoc &DL, EVT Ty, bool HasLo,
+                                           bool HasHi);
 
   SDValue getMips16SPAliasReg();
 
@@ -35,7 +36,7 @@ private:
   bool selectAddr16(SDNode *Parent, SDValue N, SDValue &Base,
                     SDValue &Offset, SDValue &Alias) override;
 
-  std::pair<bool, SDNode*> selectNode(SDNode *Node) override;
+  bool trySelect(SDNode *Node) override;
 
   void processFunctionAfterISel(MachineFunction &MF) override;
 

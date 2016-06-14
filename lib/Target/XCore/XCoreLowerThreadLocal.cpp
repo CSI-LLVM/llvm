@@ -76,7 +76,7 @@ createLoweredInitializer(ArrayType *NewType, Constant *OriginalInitializer) {
 
 static Instruction *
 createReplacementInstr(ConstantExpr *CE, Instruction *Instr) {
-  IRBuilder<true,NoFolder> Builder(Instr);
+  IRBuilder<NoFolder> Builder(Instr);
   unsigned OpCode = CE->getOpcode();
   switch (OpCode) {
     case Instruction::GetElementPtr: {
@@ -189,7 +189,7 @@ bool XCoreLowerThreadLocal::lowerGlobal(GlobalVariable *GV) {
     return false;
 
   // Create replacement global.
-  ArrayType *NewType = createLoweredType(GV->getType()->getElementType());
+  ArrayType *NewType = createLoweredType(GV->getValueType());
   Constant *NewInitializer = nullptr;
   if (GV->hasInitializer())
     NewInitializer = createLoweredInitializer(NewType,
@@ -228,12 +228,9 @@ bool XCoreLowerThreadLocal::runOnModule(Module &M) {
   // Find thread local globals.
   bool MadeChange = false;
   SmallVector<GlobalVariable *, 16> ThreadLocalGlobals;
-  for (Module::global_iterator GVI = M.global_begin(), E = M.global_end();
-       GVI != E; ++GVI) {
-    GlobalVariable *GV = GVI;
-    if (GV->isThreadLocal())
-      ThreadLocalGlobals.push_back(GV);
-  }
+  for (GlobalVariable &GV : M.globals())
+    if (GV.isThreadLocal())
+      ThreadLocalGlobals.push_back(&GV);
   for (unsigned I = 0, E = ThreadLocalGlobals.size(); I != E; ++I) {
     MadeChange |= lowerGlobal(ThreadLocalGlobals[I]);
   }

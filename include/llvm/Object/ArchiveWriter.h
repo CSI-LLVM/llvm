@@ -24,15 +24,15 @@ class NewArchiveIterator {
   bool IsNewMember;
   StringRef Name;
 
-  object::Archive::child_iterator OldI;
+  object::Archive::Child OldMember;
 
 public:
-  NewArchiveIterator(object::Archive::child_iterator I, StringRef Name);
+  NewArchiveIterator(const object::Archive::Child &OldMember, StringRef Name);
   NewArchiveIterator(StringRef FileName);
   bool isNewMember() const;
   StringRef getName() const;
 
-  object::Archive::child_iterator getOld() const;
+  const object::Archive::Child &getOld() const;
 
   StringRef getNew() const;
   llvm::ErrorOr<int> getFD(sys::fs::file_status &NewStatus) const;
@@ -42,7 +42,7 @@ public:
 std::pair<StringRef, std::error_code>
 writeArchive(StringRef ArcName, std::vector<NewArchiveIterator> &NewMembers,
              bool WriteSymtab, object::Archive::Kind Kind, bool Deterministic,
-             bool Thin);
+             bool Thin, std::unique_ptr<MemoryBuffer> OldArchiveBuf = nullptr);
 }
 
 #endif

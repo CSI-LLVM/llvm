@@ -16,12 +16,11 @@
 
 #include "llvm/Transforms/IPO.h"
 #include "llvm/ADT/SmallPtrSet.h"
-#include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/raw_ostream.h"
 #include "llvm/Analysis/CallGraph.h"
 #include "llvm/Analysis/CallGraphSCCPass.h"
-#include "llvm/Analysis/LibCallSemantics.h"
+#include "llvm/Analysis/EHPersonalities.h"
 #include "llvm/IR/CFG.h"
 #include "llvm/IR/Constants.h"
 #include "llvm/IR/Function.h"
@@ -29,6 +28,7 @@
 #include "llvm/IR/Instructions.h"
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/LLVMContext.h"
+#include "llvm/Transforms/Utils/Local.h"
 #include <algorithm>
 using namespace llvm;
 
@@ -63,6 +63,9 @@ Pass *llvm::createPruneEHPass() { return new PruneEH(); }
 
 
 bool PruneEH::runOnSCC(CallGraphSCC &SCC) {
+  if (skipSCC(SCC))
+    return false;
+
   SmallPtrSet<CallGraphNode *, 8> SCCNodes;
   CallGraph &CG = getAnalysis<CallGraphWrapperPass>().getCallGraph();
   bool MadeChange = false;
@@ -92,7 +95,10 @@ bool PruneEH::runOnSCC(CallGraphSCC &SCC) {
     if (!F) {
       SCCMightUnwind = true;
       SCCMightReturn = true;
-    } else if (F->isDeclaration() || F->mayBeOverridden()) {
+    } else if (F->isDeclaration() || F->isInterposable()) {
+      // Note: isInterposable (as opposed to hasExactDefinition) is fine above,
+      // since we're not inferring new attributes here, but only using existing,
+      // assumed to be correct, function attributes.
       SCCMightUnwind |= !F->doesNotThrow();
       SCCMightReturn |= !F->doesNotReturn();
     } else {
@@ -153,21 +159,16 @@ bool PruneEH::runOnSCC(CallGraphSCC &SCC) {
   // If the SCC doesn't unwind or doesn't throw, note this fact.
   if (!SCCMightUnwind || !SCCMightReturn)
     for (CallGraphSCC::iterator I = SCC.begin(), E = SCC.end(); I != E; ++I) {
-      AttrBuilder NewAttributes;
-
-      if (!SCCMightUnwind)
-        NewAttributes.addAttribute(Attribute::NoUnwind);
-      if (!SCCMightReturn)
-        NewAttributes.addAttribute(Attribute::NoReturn);
-
       Function *F = (*I)->getFunction();
-      const AttributeSet &PAL = F->getAttributes().getFnAttributes();
-      const AttributeSet &NPAL = AttributeSet::get(
-          F->getContext(), AttributeSet::FunctionIndex, NewAttributes);
 
-      if (PAL != NPAL) {
+      if (!SCCMightUnwind && !F->hasFnAttribute(Attribute::NoUnwind)) {
+        F->addFnAttr(Attribute::NoUnwind);
         MadeChange = true;
-        F->addAttributes(AttributeSet::FunctionIndex, NPAL);
+      }
+
+      if (!SCCMightReturn && !F->hasFnAttribute(Attribute::NoReturn)) {
+        F->addFnAttr(Attribute::NoReturn);
+        MadeChange = true;
       }
     }
 
@@ -191,28 +192,8 @@ bool PruneEH::SimplifyFunction(Function *F) {
   for (Function::iterator BB = F->begin(), E = F->end(); BB != E; ++BB) {
     if (InvokeInst *II = dyn_cast<InvokeInst>(BB->getTerminator()))
       if (II->doesNotThrow() && canSimplifyInvokeNoUnwind(F)) {
-        SmallVector<Value*, 8> Args(II->op_begin(), II->op_end() - 3);
-        // Insert a call instruction before the invoke.
-        CallInst *Call = CallInst::Create(II->getCalledValue(), Args, "", II);
-        Call->takeName(II);
-        Call->setCallingConv(II->getCallingConv());
-        Call->setAttributes(II->getAttributes());
-        Call->setDebugLoc(II->getDebugLoc());
-
-        // Anything that used the value produced by the invoke instruction
-        // now uses the value produced by the call instruction.  Note that we
-        // do this even for void functions and calls with no uses so that the
-        // callgraph edge is updated.
-        II->replaceAllUsesWith(Call);
         BasicBlock *UnwindBlock = II->getUnwindDest();
-        UnwindBlock->removePredecessor(II->getParent());
-
-        // Insert a branch to the normal destination right before the
-        // invoke.
-        BranchInst::Create(II->getNormalDest(), II);
-
-        // Finally, delete the invoke instruction!
-        BB->getInstList().pop_back();
+        removeUnwindEdge(&*BB);
 
         // If the unwind block is now dead, nuke it.
         if (pred_empty(UnwindBlock))
@@ -233,7 +214,7 @@ bool PruneEH::SimplifyFunction(Function *F) {
 
           // Remove the uncond branch and add an unreachable.
           BB->getInstList().pop_back();
-          new UnreachableInst(BB->getContext(), BB);
+          new UnreachableInst(BB->getContext(), &*BB);
 
           DeleteBasicBlock(New);  // Delete the new BB.
           MadeChange = true;
@@ -252,23 +233,39 @@ void PruneEH::DeleteBasicBlock(BasicBlock *BB) {
   assert(pred_empty(BB) && "BB is not dead!");
   CallGraph &CG = getAnalysis<CallGraphWrapperPass>().getCallGraph();
 
+  Instruction *TokenInst = nullptr;
+
   CallGraphNode *CGN = CG[BB->getParent()];
   for (BasicBlock::iterator I = BB->end(), E = BB->begin(); I != E; ) {
     --I;
-    if (CallInst *CI = dyn_cast<CallInst>(I)) {
-      if (!isa<IntrinsicInst>(I))
-        CGN->removeCallEdgeFor(CI);
-    } else if (InvokeInst *II = dyn_cast<InvokeInst>(I))
-      CGN->removeCallEdgeFor(II);
+
+    if (I->getType()->isTokenTy()) {
+      TokenInst = &*I;
+      break;
+    }
+
+    if (auto CS = CallSite (&*I)) {
+      const Function *Callee = CS.getCalledFunction();
+      if (!Callee || !Intrinsic::isLeaf(Callee->getIntrinsicID()))
+        CGN->removeCallEdgeFor(CS);
+      else if (!Callee->isIntrinsic())
+        CGN->removeCallEdgeFor(CS);
+    }
+
     if (!I->use_empty())
       I->replaceAllUsesWith(UndefValue::get(I->getType()));
   }
 
-  // Get the list of successors of this block.
-  std::vector<BasicBlock*> Succs(succ_begin(BB), succ_end(BB));
+  if (TokenInst) {
+    if (!isa<TerminatorInst>(TokenInst))
+      changeToUnreachable(TokenInst->getNextNode(), /*UseLLVMTrap=*/false);
+  } else {
+    // Get the list of successors of this block.
+    std::vector<BasicBlock *> Succs(succ_begin(BB), succ_end(BB));
 
-  for (unsigned i = 0, e = Succs.size(); i != e; ++i)
-    Succs[i]->removePredecessor(BB);
+    for (unsigned i = 0, e = Succs.size(); i != e; ++i)
+      Succs[i]->removePredecessor(BB);
 
-  BB->eraseFromParent();
+    BB->eraseFromParent();
+  }
 }

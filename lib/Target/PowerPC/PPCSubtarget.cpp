@@ -62,6 +62,7 @@ void PPCSubtarget::initializeEnvironment() {
   Has64BitSupport = false;
   Use64BitRegs = false;
   UseCRBits = false;
+  UseSoftFloat = false;
   HasAltivec = false;
   HasSPE = false;
   HasQPX = false;
@@ -69,6 +70,8 @@ void PPCSubtarget::initializeEnvironment() {
   HasP8Vector = false;
   HasP8Altivec = false;
   HasP8Crypto = false;
+  HasP9Vector = false;
+  HasP9Altivec = false;
   HasFCPSGN = false;
   HasFSQRT = false;
   HasFRE = false;
@@ -81,7 +84,6 @@ void PPCSubtarget::initializeEnvironment() {
   HasFPRND = false;
   HasFPCVT = false;
   HasISEL = false;
-  HasPOPCNTD = false;
   HasBPERMD = false;
   HasExtDiv = false;
   HasCMPB = false;
@@ -100,12 +102,17 @@ void PPCSubtarget::initializeEnvironment() {
   HasDirectMove = false;
   IsQPXStackUnaligned = false;
   HasHTM = false;
+  HasFusion = false;
+  HasFloat128 = false;
+  IsISA3_0 = false;
+
+  HasPOPCNTD = POPCNTD_Unavailable;
 }
 
 void PPCSubtarget::initSubtargetFeatures(StringRef CPU, StringRef FS) {
   // Determine default and user specified characteristics
   std::string CPUName = CPU;
-  if (CPUName.empty()) {
+  if (CPUName.empty() || CPU == "generic") {
     // If cross-compiling with -march=ppc64le without -mcpu
     if (TargetTriple.getArch() == Triple::ppc64le)
       CPUName = "ppc64le";
@@ -163,6 +170,8 @@ static bool needsAggressiveScheduling(unsigned Directive) {
   case PPC::DIR_E5500:
   case PPC::DIR_PWR7:
   case PPC::DIR_PWR8:
+  // FIXME: Same as P8 until POWER9 scheduling info is available
+  case PPC::DIR_PWR9:
     return true;
   }
 }
@@ -208,6 +217,34 @@ bool PPCSubtarget::useAA() const {
 
 bool PPCSubtarget::enableSubRegLiveness() const {
   return UseSubRegLiveness;
+}
+
+unsigned char PPCSubtarget::classifyGlobalReference(
+    const GlobalValue *GV) const {
+  // Note that currently we don't generate non-pic references.
+  // If a caller wants that, this will have to be updated.
+
+  // Large code model always uses the TOC even for local symbols.
+  if (TM.getCodeModel() == CodeModel::Large)
+    return PPCII::MO_PIC_FLAG | PPCII::MO_NLP_FLAG;
+
+  unsigned char flags = PPCII::MO_PIC_FLAG;
+
+  // Only if the relocation mode is PIC do we have to worry about
+  // interposition. In all other cases we can use a slightly looser standard to
+  // decide how to access the symbol.
+  if (TM.getRelocationModel() == Reloc::PIC_) {
+    // If it's local, or it's non-default, it can't be interposed.
+    if (!GV->hasLocalLinkage() &&
+        GV->hasDefaultVisibility()) {
+      flags |= PPCII::MO_NLP_FLAG;
+    }
+    return flags;
+  }
+
+  if (GV->isStrongDefinitionForLinker())
+    return flags;
+  return flags | PPCII::MO_NLP_FLAG;
 }
 
 bool PPCSubtarget::isELFv2ABI() const { return TM.isELFv2ABI(); }

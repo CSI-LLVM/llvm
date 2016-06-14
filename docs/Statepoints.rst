@@ -53,7 +53,7 @@ load barriers, store barriers, and safepoints.
    loads, merely loads of a particular type (in the original source
    language), or none at all.
 
-#. Analogously, a store barrier is a code fragement that runs
+#. Analogously, a store barrier is a code fragment that runs
    immediately before the machine store instruction, but after the
    computation of the value stored.  The most common use of a store
    barrier is to update a 'card table' in a generational garbage
@@ -142,8 +142,8 @@ resulting relocation sequence is:
 
   define i8 addrspace(1)* @test1(i8 addrspace(1)* %obj) 
          gc "statepoint-example" {
-    %0 = call i32 (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 0, i8 addrspace(1)* %obj)
-    %obj.relocated = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(i32 %0, i32 7, i32 7)
+    %0 = call token (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 0, i8 addrspace(1)* %obj)
+    %obj.relocated = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(token %0, i32 7, i32 7)
     ret i8 addrspace(1)* %obj.relocated
   }
 
@@ -160,7 +160,7 @@ of the call, we use the ``gc.result`` intrinsic.  To get the relocation
 of each pointer in turn, we use the ``gc.relocate`` intrinsic with the
 appropriate index.  Note that both the ``gc.relocate`` and ``gc.result`` are
 tied to the statepoint.  The combination forms a "statepoint relocation 
-sequence" and represents the entitety of a parseable call or 'statepoint'.
+sequence" and represents the entirety of a parseable call or 'statepoint'.
 
 When lowered, this example would generate the following x86 assembly:
 
@@ -206,6 +206,54 @@ This example was taken from the tests for the :ref:`RewriteStatepointsForGC` uti
 
   opt -rewrite-statepoints-for-gc test/Transforms/RewriteStatepointsForGC/basics.ll -S | llc -debug-only=stackmaps
 
+Base & Derived Pointers
+^^^^^^^^^^^^^^^^^^^^^^^
+
+A "base pointer" is one which points to the starting address of an allocation
+(object).  A "derived pointer" is one which is offset from a base pointer by
+some amount.  When relocating objects, a garbage collector needs to be able 
+to relocate each derived pointer associated with an allocation to the same 
+offset from the new address.
+
+"Interior derived pointers" remain within the bounds of the allocation 
+they're associated with.  As a result, the base object can be found at 
+runtime provided the bounds of allocations are known to the runtime system.
+
+"Exterior derived pointers" are outside the bounds of the associated object;
+they may even fall within *another* allocations address range.  As a result,
+there is no way for a garbage collector to determine which allocation they 
+are associated with at runtime and compiler support is needed.
+
+The ``gc.relocate`` intrinsic supports an explicit operand for describing the
+allocation associated with a derived pointer.  This operand is frequently 
+referred to as the base operand, but does not strictly speaking have to be
+a base pointer, but it does need to lie within the bounds of the associated
+allocation.  Some collectors may require that the operand be an actual base
+pointer rather than merely an internal derived pointer. Note that during 
+lowering both the base and derived pointer operands are required to be live 
+over the associated call safepoint even if the base is otherwise unused 
+afterwards.
+
+If we extend our previous example to include a pointless derived pointer, 
+we get:
+
+.. code-block:: llvm
+
+  define i8 addrspace(1)* @test1(i8 addrspace(1)* %obj) 
+         gc "statepoint-example" {
+    %gep = getelementptr i8, i8 addrspace(1)* %obj, i64 20000
+    %token = call token (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 0, i8 addrspace(1)* %obj, i8 addrspace(1)* %gep)
+    %obj.relocated = call i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(token %token, i32 7, i32 7)
+    %gep.relocated = call i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(token %token, i32 7, i32 8)
+    %p = getelementptr i8, i8 addrspace(1)* %gep, i64 -20000
+    ret i8 addrspace(1)* %p
+  }
+
+Note that in this example %p and %obj.relocate are the same address and we
+could replace one with the other, potentially removing the derived pointer
+from the live set at the safepoint entirely.
+
+.. _gc_transition_args:
 
 GC Transitions
 ^^^^^^^^^^^^^^^^^^
@@ -214,7 +262,7 @@ As a practical consideration, many garbage-collected systems allow code that is
 collector-aware ("managed code") to call code that is not collector-aware
 ("unmanaged code"). It is common that such calls must also be safepoints, since
 it is desirable to allow the collector to run during the execution of
-unmanaged code. Futhermore, it is common that coordinating the transition from
+unmanaged code. Furthermore, it is common that coordinating the transition from
 managed to unmanaged code requires extra code generation at the call site to
 inform the collector of the transition. In order to support these needs, a
 statepoint may be marked as a GC transition, and data that is necessary to
@@ -225,7 +273,7 @@ statepoint.
   transitions based on the function symbols involved (e.g. a call from a
   function with GC strategy "foo" to a function with GC strategy "bar"),
   indirect calls that are also GC transitions must also be supported. This
-  requirement is the driving force behing the decision to require that GC
+  requirement is the driving force behind the decision to require that GC
   transitions are explicitly marked.
 
 Let's revisit the sample given above, this time treating the call to ``@foo``
@@ -242,8 +290,8 @@ to unmanaged code. The resulting relocation sequence is:
   define i8 addrspace(1)* @test1(i8 addrspace(1) *%obj)
          gc "hypothetical-gc" {
 
-    %0 = call i32 (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @foo, i32 0, i32 1, i32* @Flag, i32 0, i8 addrspace(1)* %obj)
-    %obj.relocated = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(i32 %0, i32 7, i32 7)
+    %0 = call token (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 0, i32 0, void ()* @foo, i32 0, i32 1, i32* @Flag, i32 0, i8 addrspace(1)* %obj)
+    %obj.relocated = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(token %0, i32 7, i32 7)
     ret i8 addrspace(1)* %obj.relocated
   }
 
@@ -296,7 +344,7 @@ Syntax:
 
 ::
 
-      declare i32
+      declare token
         @llvm.experimental.gc.statepoint(i64 <id>, i32 <num patch bytes>,
                        func_type <target>, 
                        i64 <#call args>, i64 <flags>,
@@ -410,7 +458,7 @@ Syntax:
 ::
 
       declare type*
-        @llvm.experimental.gc.result(i32 %statepoint_token)
+        @llvm.experimental.gc.result(token %statepoint_token)
 
 Overview:
 """""""""
@@ -426,7 +474,7 @@ Operands:
 
 The first and only argument is the ``gc.statepoint`` which starts
 the safepoint sequence of which this ``gc.result`` is a part.
-Despite the typing of this as a generic i32, *only* the value defined
+Despite the typing of this as a generic token, *only* the value defined 
 by a ``gc.statepoint`` is legal here.
 
 Semantics:
@@ -450,7 +498,7 @@ Syntax:
 ::
 
       declare <pointer type>
-        @llvm.experimental.gc.relocate(i32 %statepoint_token, 
+        @llvm.experimental.gc.relocate(token %statepoint_token, 
                                        i32 %base_offset, 
                                        i32 %pointer_offset)
 
@@ -465,13 +513,18 @@ Operands:
 
 The first argument is the ``gc.statepoint`` which starts the
 safepoint sequence of which this ``gc.relocation`` is a part.
-Despite the typing of this as a generic i32, *only* the value defined
+Despite the typing of this as a generic token, *only* the value defined 
 by a ``gc.statepoint`` is legal here.
 
 The second argument is an index into the statepoints list of arguments
-which specifies the base pointer for the pointer being relocated.
+which specifies the allocation for the pointer being relocated.
 This index must land within the 'gc parameter' section of the
-statepoint's argument list.
+statepoint's argument list.  The associated value must be within the
+object with which the pointer being relocated is associated. The optimizer
+is free to change *which* interior derived pointer is reported, provided that
+it does not replace an actual base pointer with another interior derived 
+pointer.  Collectors are allowed to rely on the base pointer operand 
+remaining an actual base pointer if so constructed.
 
 The third argument is an index into the statepoint's list of arguments
 which specify the (potentially) derived pointer being relocated.  It
@@ -515,15 +568,36 @@ Each statepoint generates the following Locations:
 * Constant which describes number of following deopt *Locations* (not
   operands)
 * Variable number of Locations, one for each deopt parameter listed in
-  the IR statepoint (same number as described by previous Constant)
-* Variable number of Locations pairs, one pair for each unique pointer
-  which needs relocated.  The first Location in each pair describes
-  the base pointer for the object.  The second is the derived pointer
-  actually being relocated.  It is guaranteed that the base pointer
-  must also appear explicitly as a relocation pair if used after the
-  statepoint. There may be fewer pairs then gc parameters in the IR
+  the IR statepoint (same number as described by previous Constant).  At 
+  the moment, only deopt parameters with a bitwidth of 64 bits or less 
+  are supported.  Values of a type larger than 64 bits can be specified 
+  and reported only if a) the value is constant at the call site, and b) 
+  the constant can be represented with less than 64 bits (assuming zero 
+  extension to the original bitwidth).
+* Variable number of relocation records, each of which consists of 
+  exactly two Locations.  Relocation records are described in detail
+  below.
+
+Each relocation record provides sufficient information for a collector to 
+relocate one or more derived pointers.  Each record consists of a pair of 
+Locations.  The second element in the record represents the pointer (or 
+pointers) which need updated.  The first element in the record provides a 
+pointer to the base of the object with which the pointer(s) being relocated is
+associated.  This information is required for handling generalized derived 
+pointers since a pointer may be outside the bounds of the original allocation,
+but still needs to be relocated with the allocation.  Additionally:
+
+* It is guaranteed that the base pointer must also appear explicitly as a 
+  relocation pair if used after the statepoint. 
+* There may be fewer relocation records then gc parameters in the IR
   statepoint. Each *unique* pair will occur at least once; duplicates
-  are possible.
+  are possible.  
+* The Locations within each record may either be of pointer size or a 
+  multiple of pointer size.  In the later case, the record must be 
+  interpreted as describing a sequence of pointers and their corresponding 
+  base pointers. If the Location is of size N x sizeof(pointer), then
+  there will be N records of one pointer each contained within the Location.
+  Both Locations in a pair can be assumed to be of the same size.
 
 Note that the Locations used in each section may describe the same
 physical location.  e.g. A stack slot may appear as a deopt location,
@@ -567,7 +641,7 @@ The existing IR Verifier pass has been extended to check most of the
 local restrictions on the intrinsics mentioned in their respective
 documentation.  The current implementation in LLVM does not check the
 key relocation invariant, but this is ongoing work on developing such
-a verifier.  Please ask on llvmdev if you're interested in
+a verifier.  Please ask on llvm-dev if you're interested in
 experimenting with the current version.
 
 .. _statepoint-utilities:
@@ -592,7 +666,7 @@ As an example, given this code:
 
   define i8 addrspace(1)* @test1(i8 addrspace(1)* %obj) 
          gc "statepoint-example" {
-    call i32 (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 2882400000, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0)
+    call token (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 2882400000, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0)
     ret i8 addrspace(1)* %obj
   }
 
@@ -602,8 +676,8 @@ The pass would produce this IR:
 
   define i8 addrspace(1)* @test1(i8 addrspace(1)* %obj) 
          gc "statepoint-example" {
-    %0 = call i32 (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 2882400000, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i8 addrspace(1)* %obj)
-    %obj.relocated = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(i32 %0, i32 12, i32 12)
+    %0 = call token (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 2882400000, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 5, i32 0, i32 -1, i32 0, i32 0, i32 0, i8 addrspace(1)* %obj)
+    %obj.relocated = call coldcc i8 addrspace(1)* @llvm.experimental.gc.relocate.p1i8(token %0, i32 12, i32 12)
     ret i8 addrspace(1)* %obj.relocated
   }
 
@@ -614,8 +688,18 @@ non references.  Address space 1 is not globally reserved for this purpose.
 This pass can be used an utility function by a language frontend that doesn't 
 want to manually reason about liveness, base pointers, or relocation when 
 constructing IR.  As currently implemented, RewriteStatepointsForGC must be 
-run after SSA construction (i.e. mem2ref).  
+run after SSA construction (i.e. mem2ref).
 
+RewriteStatepointsForGC will ensure that appropriate base pointers are listed
+for every relocation created.  It will do so by duplicating code as needed to
+propagate the base pointer associated with each pointer being relocated to
+the appropriate safepoints.  The implementation assumes that the following 
+IR constructs produce base pointers: loads from the heap, addresses of global 
+variables, function arguments, function return values. Constant pointers (such
+as null) are also assumed to be base pointers.  In practice, this constraint
+can be relaxed to producing interior derived pointers provided the target 
+collector can find the associated allocation from an arbitrary interior 
+derived pointer.
 
 In practice, RewriteStatepointsForGC can be run much later in the pass 
 pipeline, after most optimization is already done.  This helps to improve 
@@ -656,8 +740,8 @@ This pass would produce the following IR:
 .. code-block:: llvm
 
   define void @test() gc "statepoint-example" {
-    %safepoint_token = call i32 (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 2882400000, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0)
-    %safepoint_token1 = call i32 (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 2882400000, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 0)
+    %safepoint_token = call token (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 2882400000, i32 0, void ()* @do_safepoint, i32 0, i32 0, i32 0, i32 0)
+    %safepoint_token1 = call token (i64, i32, void ()*, i32, i32, ...)* @llvm.experimental.gc.statepoint.p0f_isVoidf(i64 2882400000, i32 0, void ()* @foo, i32 0, i32 0, i32 0, i32 0)
     ret void
   }
 
@@ -698,7 +782,7 @@ If you are scheduling the RewriteStatepointsForGC pass late in the pass order,
 you should probably schedule this pass immediately before it.  The exception 
 would be if you need to preserve abstract frame information (e.g. for
 deoptimization or introspection) at safepoints.  In that case, ask on the 
-llvmdev mailing list for suggestions.
+llvm-dev mailing list for suggestions.
 
 
 Supported Architectures
@@ -706,6 +790,41 @@ Supported Architectures
 
 Support for statepoint generation requires some code for each backend.
 Today, only X86_64 is supported.  
+
+Problem Areas and Active Work
+=============================
+
+#. As the existing users of the late rewriting model have matured, we've found
+   cases where the optimizer breaks the assumption that an SSA value of
+   gc-pointer type actually contains a gc-pointer and vice-versa.  We need to
+   clarify our expectations and propose at least one small IR change.  (Today,
+   the gc-pointer distinction is managed via address spaces.  This turns out
+   not to be quite strong enough.)
+
+#. Support for languages which allow unmanaged pointers to garbage collected
+   objects (i.e. pass a pointer to an object to a C routine) via pinning.
+
+#. Support for garbage collected objects allocated on the stack.  Specifically,
+   allocas are always assumed to be in address space 0 and we need a
+   cast/promotion operator to let rewriting identify them.
+
+#. The current statepoint lowering is known to be somewhat poor.  In the very
+   long term, we'd like to integrate statepoints with the register allocator;
+   in the near term this is unlikely to happen.  We've found the quality of
+   lowering to be relatively unimportant as hot-statepoints are almost always
+   inliner bugs.
+
+#. Concerns have been raised that the statepoint representation results in a
+   large amount of IR being produced for some examples and that this
+   contributes to higher than expected memory usage and compile times.  There's
+   no immediate plans to make changes due to this, but alternate models may be
+   explored in the future.
+
+#. Relocations along exceptional paths are currently broken in ToT.  In
+   particular, there is current no way to represent a rethrow on a path which
+   also has relocations.  See `this llvm-dev discussion
+   <https://groups.google.com/forum/#!topic/llvm-dev/AE417XjgxvI>`_ for more
+   detail.
 
 Bugs and Enhancements
 =====================
@@ -715,8 +834,8 @@ tracked by performing a `bugzilla search
 <http://llvm.org/bugs/buglist.cgi?cmdtype=runnamed&namedcmd=Statepoint%20Bugs&list_id=64342>`_
 for [Statepoint] in the summary field. When filing new bugs, please
 use this tag so that interested parties see the newly filed bug.  As
-with most LLVM features, design discussions take place on `llvmdev
-<http://lists.cs.uiuc.edu/mailman/listinfo/llvmdev>`_, and patches
+with most LLVM features, design discussions take place on `llvm-dev
+<http://lists.llvm.org/mailman/listinfo/llvm-dev>`_, and patches
 should be sent to `llvm-commits
-<http://lists.cs.uiuc.edu/mailman/listinfo/llvm-commits>`_ for review.
+<http://lists.llvm.org/mailman/listinfo/llvm-commits>`_ for review.
 

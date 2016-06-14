@@ -11,7 +11,6 @@
 //
 //===----------------------------------------------------------------------===//
 #include "AArch64BaseInfo.h"
-#include "llvm/ADT/APFloat.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Support/Regex.h"
@@ -146,10 +145,21 @@ const AArch64NamedImmMapper::Mapping AArch64PState::PStateMapper::PStateMappings
 
   // v8.1a "Privileged Access Never" extension-specific PStates
   {"pan", PAN, {AArch64::HasV8_1aOps}},
+
+  // v8.2a
+  {"uao", UAO, {AArch64::HasV8_2aOps}},
 };
 
 AArch64PState::PStateMapper::PStateMapper()
   : AArch64NamedImmMapper(PStateMappings, 0) {}
+
+const AArch64NamedImmMapper::Mapping AArch64PSBHint::PSBHintMapper::PSBHintMappings[] = {
+  // v8.2a "Statistical Profiling" extension-specific PSB operand
+  {"csync", CSync, {AArch64::FeatureSPE}},
+};
+
+AArch64PSBHint::PSBHintMapper::PSBHintMapper()
+  : AArch64NamedImmMapper(PSBHintMappings, 0) {}
 
 const AArch64NamedImmMapper::Mapping AArch64SysReg::MRSMapper::MRSMappings[] = {
   {"mdccsr_el0", MDCCSR_EL0, {}},
@@ -192,6 +202,7 @@ const AArch64NamedImmMapper::Mapping AArch64SysReg::MRSMapper::MRSMappings[] = {
   {"id_aa64isar1_el1", ID_A64ISAR1_EL1, {}},
   {"id_aa64mmfr0_el1", ID_A64MMFR0_EL1, {}},
   {"id_aa64mmfr1_el1", ID_A64MMFR1_EL1, {}},
+  {"id_aa64mmfr2_el1", ID_A64MMFR2_EL1, {AArch64::HasV8_2aOps}},
   {"mvfr0_el1", MVFR0_EL1, {}},
   {"mvfr1_el1", MVFR1_EL1, {}},
   {"mvfr2_el1", MVFR2_EL1, {}},
@@ -252,6 +263,10 @@ const AArch64NamedImmMapper::Mapping AArch64SysReg::MRSMapper::MRSMappings[] = {
 
   // v8.1a "Limited Ordering Regions" extension-specific system registers
   {"lorid_el1", LORID_EL1, {AArch64::HasV8_1aOps}},
+
+  // v8.2a "Reliability, Availability and Serviceability" extensions registers
+  {"erridr_el1", ERRIDR_EL1, {AArch64::FeatureRAS}},
+  {"erxfr_el1", ERXFR_EL1, {AArch64::FeatureRAS}}
 };
 
 AArch64SysReg::MRSMapper::MRSMapper() {
@@ -275,9 +290,6 @@ const AArch64NamedImmMapper::Mapping AArch64SysReg::MSRMapper::MSRMappings[] = {
   {"icc_sgi1r_el1", ICC_SGI1R_EL1, {}},
   {"icc_asgi1r_el1", ICC_ASGI1R_EL1, {}},
   {"icc_sgi0r_el1", ICC_SGI0R_EL1, {}},
-
-  // v8.1a "Privileged Access Never" extension-specific system registers
-  {"pan", PAN, {AArch64::HasV8_1aOps}},
 };
 
 AArch64SysReg::MSRMapper::MSRMapper() {
@@ -804,10 +816,39 @@ const AArch64NamedImmMapper::Mapping AArch64SysReg::SysRegMapper::SysRegMappings
   {"cntv_cval_el02", CNTV_CVAL_EL02, {AArch64::HasV8_1aOps}},
   {"spsr_el12", SPSR_EL12, {AArch64::HasV8_1aOps}},
   {"elr_el12", ELR_EL12, {AArch64::HasV8_1aOps}},
+
+  // v8.2a registers
+  {"uao",           UAO,           {AArch64::HasV8_2aOps}},
+
+  // v8.2a "Reliability, Availability and Serviceability" extensions registers
+  {"errselr_el1",   ERRSELR_EL1,   {AArch64::FeatureRAS}},
+  {"erxctlr_el1",   ERXCTLR_EL1,   {AArch64::FeatureRAS}},
+  {"erxstatus_el1", ERXSTATUS_EL1, {AArch64::FeatureRAS}},
+  {"erxaddr_el1",   ERXADDR_EL1,   {AArch64::FeatureRAS}},
+  {"erxmisc0_el1",  ERXMISC0_EL1,  {AArch64::FeatureRAS}},
+  {"erxmisc1_el1",  ERXMISC1_EL1,  {AArch64::FeatureRAS}},
+  {"disr_el1",      DISR_EL1,      {AArch64::FeatureRAS}},
+  {"vdisr_el2",     VDISR_EL2,     {AArch64::FeatureRAS}},
+  {"vsesr_el2",     VSESR_EL2,     {AArch64::FeatureRAS}},
+
+  // v8.2a "Statistical Profiling extension" registers
+  {"pmblimitr_el1", PMBLIMITR_EL1, {AArch64::FeatureSPE}},
+  {"pmbptr_el1",    PMBPTR_EL1,    {AArch64::FeatureSPE}},
+  {"pmbsr_el1",     PMBSR_EL1,     {AArch64::FeatureSPE}},
+  {"pmbidr_el1",    PMBIDR_EL1,    {AArch64::FeatureSPE}},
+  {"pmscr_el2",     PMSCR_EL2,     {AArch64::FeatureSPE}},
+  {"pmscr_el12",    PMSCR_EL12,    {AArch64::FeatureSPE}},
+  {"pmscr_el1",     PMSCR_EL1,     {AArch64::FeatureSPE}},
+  {"pmsicr_el1",    PMSICR_EL1,    {AArch64::FeatureSPE}},
+  {"pmsirr_el1",    PMSIRR_EL1,    {AArch64::FeatureSPE}},
+  {"pmsfcr_el1",    PMSFCR_EL1,    {AArch64::FeatureSPE}},
+  {"pmsevfr_el1",   PMSEVFR_EL1,   {AArch64::FeatureSPE}},
+  {"pmslatfr_el1",  PMSLATFR_EL1,  {AArch64::FeatureSPE}},
+  {"pmsidr_el1",    PMSIDR_EL1,    {AArch64::FeatureSPE}},
 };
 
 uint32_t
-AArch64SysReg::SysRegMapper::fromString(StringRef Name, 
+AArch64SysReg::SysRegMapper::fromString(StringRef Name,
     const FeatureBitset& FeatureBits, bool &Valid) const {
   std::string NameLower = Name.lower();
 
@@ -851,7 +892,7 @@ AArch64SysReg::SysRegMapper::fromString(StringRef Name,
 }
 
 std::string
-AArch64SysReg::SysRegMapper::toString(uint32_t Bits, 
+AArch64SysReg::SysRegMapper::toString(uint32_t Bits,
                                       const FeatureBitset& FeatureBits) const {
   // First search the registers shared by all
   for (unsigned i = 0; i < array_lengthof(SysRegMappings); ++i) {

@@ -94,16 +94,16 @@ TEST(CommandLineTest, ModifyExisitingOption) {
     "Failed to modify option's option category.";
 
   Retrieved->setDescription(Description);
-  ASSERT_STREQ(Retrieved->HelpStr, Description) <<
-    "Changing option description failed.";
+  ASSERT_STREQ(Retrieved->HelpStr.data(), Description)
+      << "Changing option description failed.";
 
   Retrieved->setArgStr(ArgString);
-  ASSERT_STREQ(ArgString, Retrieved->ArgStr) <<
-    "Failed to modify option's Argument string.";
+  ASSERT_STREQ(ArgString, Retrieved->ArgStr.data())
+      << "Failed to modify option's Argument string.";
 
   Retrieved->setValueStr(ValueString);
-  ASSERT_STREQ(Retrieved->ValueStr, ValueString) <<
-    "Failed to modify option's Value string.";
+  ASSERT_STREQ(Retrieved->ValueStr.data(), ValueString)
+      << "Failed to modify option's Value string.";
 
   Retrieved->setHiddenFlag(cl::Hidden);
   ASSERT_EQ(cl::Hidden, TestOption.getOptionHiddenFlag()) <<
@@ -155,7 +155,7 @@ void testCommandLineTokenizer(ParserFunction *parse, const char *Input,
                               const char *const Output[], size_t OutputSize) {
   SmallVector<const char *, 0> Actual;
   BumpPtrAllocator A;
-  BumpPtrStringSaver Saver(A);
+  StringSaver Saver(A);
   parse(Input, Saver, Actual, /*MarkEOLs=*/false);
   EXPECT_EQ(OutputSize, Actual.size());
   for (unsigned I = 0, E = Actual.size(); I != E; ++I) {
@@ -165,11 +165,12 @@ void testCommandLineTokenizer(ParserFunction *parse, const char *Input,
 }
 
 TEST(CommandLineTest, TokenizeGNUCommandLine) {
-  const char *Input = "foo\\ bar \"foo bar\" \'foo bar\' 'foo\\\\bar' "
-                      "foo\"bar\"baz C:\\src\\foo.cpp \"C:\\src\\foo.cpp\"";
-  const char *const Output[] = { "foo bar", "foo bar", "foo bar", "foo\\bar",
-                                 "foobarbaz", "C:\\src\\foo.cpp",
-                                 "C:\\src\\foo.cpp" };
+  const char *Input =
+      "foo\\ bar \"foo bar\" \'foo bar\' 'foo\\\\bar' -DFOO=bar\\(\\) "
+      "foo\"bar\"baz C:\\\\src\\\\foo.cpp \"C:\\src\\foo.cpp\"";
+  const char *const Output[] = {
+      "foo bar",     "foo bar",   "foo bar",          "foo\\bar",
+      "-DFOO=bar()", "foobarbaz", "C:\\src\\foo.cpp", "C:srcfoo.cpp"};
   testCommandLineTokenizer(cl::TokenizeGNUCommandLine, Input, Output,
                            array_lengthof(Output));
 }

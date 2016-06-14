@@ -10,8 +10,6 @@ declare <8 x i32> @llvm.x86.avx2.psllv.d.256(<8 x i32>, <8 x i32>)
 declare <4 x i32> @llvm.x86.avx2.psllv.d(<4 x i32>, <4 x i32>)
 declare <8 x i16> @llvm.x86.sse2.psrl.w(<8 x i16>, <8 x i16>)
 declare <8 x i16> @llvm.x86.sse2.pslli.w(<8 x i16>, i32)
-declare <2 x i64> @llvm.x86.sse2.psll.dq(<2 x i64>, i32)
-declare <2 x i64> @llvm.x86.sse2.psll.dq.bs(<2 x i64>, i32)
 
 define i64 @test_mmx(i64 %x.coerce, i64 %y.coerce) sanitize_memory {
 entry:
@@ -25,7 +23,7 @@ entry:
   ret i64 %6
 }
 
-; CHECK: @test_mmx
+; CHECK-LABEL: @test_mmx
 ; CHECK: = icmp ne i64 {{.*}}, 0
 ; CHECK: [[C:%.*]] = sext i1 {{.*}} to i64
 ; CHECK: [[A:%.*]] = call x86_mmx @llvm.x86.mmx.psll.d(
@@ -41,7 +39,7 @@ entry:
   ret <8 x i16> %0
 }
 
-; CHECK: @test_sse2_scalar
+; CHECK-LABEL: @test_sse2_scalar
 ; CHECK: = icmp ne i32 {{.*}}, 0
 ; CHECK: = sext i1 {{.*}} to i128
 ; CHECK: = bitcast i128 {{.*}} to <8 x i16>
@@ -57,7 +55,7 @@ entry:
   ret <8 x i16> %0
 }
 
-; CHECK: @test_sse2
+; CHECK-LABEL: @test_sse2
 ; CHECK: = bitcast <8 x i16> {{.*}} to i128
 ; CHECK: = trunc i128 {{.*}} to i64
 ; CHECK: = icmp ne i64 {{.*}}, 0
@@ -77,7 +75,7 @@ entry:
   ret <4 x i32> %0
 }
 
-; CHECK: @test_avx2
+; CHECK-LABEL: @test_avx2
 ; CHECK: = icmp ne <4 x i32> {{.*}}, zeroinitializer
 ; CHECK: = sext <4 x i1> {{.*}} to <4 x i32>
 ; CHECK: = call <4 x i32> @llvm.x86.avx2.psllv.d(
@@ -91,7 +89,7 @@ entry:
   ret <8 x i32> %0
 }
 
-; CHECK: @test_avx2_256
+; CHECK-LABEL: @test_avx2_256
 ; CHECK: = icmp ne <8 x i32> {{.*}}, zeroinitializer
 ; CHECK: = sext <8 x i1> {{.*}} to <8 x i32>
 ; CHECK: = call <8 x i32> @llvm.x86.avx2.psllv.d.256(

@@ -14,7 +14,6 @@
 #include "Mips16ISelDAGToDAG.h"
 #include "MCTargetDesc/MipsBaseInfo.h"
 #include "Mips.h"
-#include "MipsAnalyzeImmediate.h"
 #include "MipsMachineFunction.h"
 #include "MipsRegisterInfo.h"
 #include "llvm/CodeGen/MachineConstantPool.h"
@@ -43,8 +42,8 @@ bool Mips16DAGToDAGISel::runOnMachineFunction(MachineFunction &MF) {
   return MipsDAGToDAGISel::runOnMachineFunction(MF);
 }
 /// Select multiply instructions.
-std::pair<SDNode*, SDNode*>
-Mips16DAGToDAGISel::selectMULT(SDNode *N, unsigned Opc, SDLoc DL, EVT Ty,
+std::pair<SDNode *, SDNode *>
+Mips16DAGToDAGISel::selectMULT(SDNode *N, unsigned Opc, const SDLoc &DL, EVT Ty,
                                bool HasLo, bool HasHi) {
   SDNode *Lo = nullptr, *Hi = nullptr;
   SDNode *Mul = CurDAG->getMachineNode(Opc, DL, MVT::Glue, N->getOperand(0),
@@ -73,7 +72,7 @@ void Mips16DAGToDAGISel::initGlobalBaseReg(MachineFunction &MF) {
   MachineBasicBlock::iterator I = MBB.begin();
   MachineRegisterInfo &RegInfo = MF.getRegInfo();
   const TargetInstrInfo &TII = *Subtarget->getInstrInfo();
-  DebugLoc DL = I != MBB.end() ? I->getDebugLoc() : DebugLoc();
+  DebugLoc DL;
   unsigned V0, V1, V2, GlobalBaseReg = MipsFI->getGlobalBaseReg();
   const TargetRegisterClass *RC = &Mips::CPU16RegsRegClass;
 
@@ -242,7 +241,7 @@ bool Mips16DAGToDAGISel::selectAddr16(
 
 /// Select instructions not customized! Used for
 /// expanded, promoted and normal instructions
-std::pair<bool, SDNode*> Mips16DAGToDAGISel::selectNode(SDNode *Node) {
+bool Mips16DAGToDAGISel::trySelect(SDNode *Node) {
   unsigned Opcode = Node->getOpcode();
   SDLoc DL(Node);
 
@@ -286,9 +285,8 @@ std::pair<bool, SDNode*> Mips16DAGToDAGISel::selectNode(SDNode *Node) {
     SDNode *AddCarry = CurDAG->getMachineNode(Addu_op, DL, VT,
                                               SDValue(Carry,0), RHS);
 
-    SDNode *Result = CurDAG->SelectNodeTo(Node, MOp, VT, MVT::Glue, LHS,
-                                          SDValue(AddCarry,0));
-    return std::make_pair(true, Result);
+    CurDAG->SelectNodeTo(Node, MOp, VT, MVT::Glue, LHS, SDValue(AddCarry, 0));
+    return true;
   }
 
   /// Mul with two results
@@ -303,18 +301,20 @@ std::pair<bool, SDNode*> Mips16DAGToDAGISel::selectNode(SDNode *Node) {
     if (!SDValue(Node, 1).use_empty())
       ReplaceUses(SDValue(Node, 1), SDValue(LoHi.second, 0));
 
-    return std::make_pair(true, nullptr);
+    CurDAG->RemoveDeadNode(Node);
+    return true;
   }
 
   case ISD::MULHS:
   case ISD::MULHU: {
     MultOpc = (Opcode == ISD::MULHU ? Mips::MultuRxRy16 : Mips::MultRxRy16);
-    SDNode *Result = selectMULT(Node, MultOpc, DL, NodeTy, false, true).second;
-    return std::make_pair(true, Result);
+    auto LoHi = selectMULT(Node, MultOpc, DL, NodeTy, false, true);
+    ReplaceNode(Node, LoHi.second);
+    return true;
   }
   }
 
-  return std::make_pair(false, nullptr);
+  return false;
 }
 
 FunctionPass *llvm::createMips16ISelDag(MipsTargetMachine &TM) {

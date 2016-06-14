@@ -285,17 +285,17 @@ struct AArch64NamedImmMapper {
     // Zero value of FeatureBitSet means the mapping is always available
     FeatureBitset FeatureBitSet;
 
-    bool isNameEqual(std::string Other, 
-                     const FeatureBitset& FeatureBits) const {
-      if (FeatureBitSet.any() && 
+    bool isNameEqual(const std::string &Other,
+                     const FeatureBitset &FeatureBits) const {
+      if (FeatureBitSet.any() &&
           (FeatureBitSet & FeatureBits).none())
         return false;
       return Name == Other;
     }
 
-    bool isValueEqual(uint32_t Other, 
+    bool isValueEqual(uint32_t Other,
                       const FeatureBitset& FeatureBits) const {
-      if (FeatureBitSet.any() && 
+      if (FeatureBitSet.any() &&
           (FeatureBitSet & FeatureBits).none())
         return false;
       return Value == Other;
@@ -310,7 +310,7 @@ struct AArch64NamedImmMapper {
   StringRef toString(uint32_t Value, const FeatureBitset& FeatureBits,
                      bool &Valid) const;
   // Maps string to value, depending on availability for FeatureBits given
-  uint32_t fromString(StringRef Name, const FeatureBitset& FeatureBits, 
+  uint32_t fromString(StringRef Name, const FeatureBitset& FeatureBits,
                      bool &Valid) const;
 
   /// Many of the instructions allow an alternative assembly form consisting of
@@ -337,7 +337,9 @@ namespace AArch64AT {
     S12E1R = 0x63c4, // 01  100  0111  1000  100
     S12E1W = 0x63c5, // 01  100  0111  1000  101
     S12E0R = 0x63c6, // 01  100  0111  1000  110
-    S12E0W = 0x63c7  // 01  100  0111  1000  111
+    S12E0W = 0x63c7, // 01  100  0111  1000  111
+    S1E1RP = 0x43c8, // 01  000  0111  1001  000
+    S1E1WP = 0x43c9  // 01  000  0111  1001  001
   };
 
   struct ATMapper : AArch64NamedImmMapper {
@@ -463,12 +465,30 @@ namespace AArch64PState {
 
     // v8.1a "Privileged Access Never" extension-specific PStates
     PAN = 0x04,
+
+    // v8.2a "User Access Override" extension-specific PStates
+    UAO = 0x03
   };
 
   struct PStateMapper : AArch64NamedImmMapper {
     const static Mapping PStateMappings[];
 
     PStateMapper();
+  };
+
+}
+
+namespace AArch64PSBHint {
+  enum PSBHintValues {
+    Invalid = -1,
+    // v8.2a "Statistical Profiling" extension-specific PSB operands
+    CSync = 0x11,  // psb csync = hint #0x11
+  };
+
+  struct PSBHintMapper : AArch64NamedImmMapper {
+    const static Mapping PSBHintMappings[];
+
+    PSBHintMapper();
   };
 
 }
@@ -594,6 +614,7 @@ namespace AArch64SysReg {
     ID_A64ISAR1_EL1   = 0xc031, // 11  000  0000  0110  001
     ID_A64MMFR0_EL1   = 0xc038, // 11  000  0000  0111  000
     ID_A64MMFR1_EL1   = 0xc039, // 11  000  0000  0111  001
+    ID_A64MMFR2_EL1   = 0xc03a, // 11  000  0000  0111  010
     MVFR0_EL1         = 0xc018, // 11  000  0000  0011  000
     MVFR1_EL1         = 0xc019, // 11  000  0000  0011  001
     MVFR2_EL1         = 0xc01a, // 11  000  0000  0011  010
@@ -651,7 +672,11 @@ namespace AArch64SysReg {
     ICC_RPR_EL1       = 0xc65b, // 11  000  1100  1011  011
     ICH_VTR_EL2       = 0xe659, // 11  100  1100  1011  001
     ICH_EISR_EL2      = 0xe65b, // 11  100  1100  1011  011
-    ICH_ELSR_EL2      = 0xe65d  // 11  100  1100  1011  101
+    ICH_ELSR_EL2      = 0xe65d, // 11  100  1100  1011  101
+
+    // RAS extension registers
+    ERRIDR_EL1        = 0xc298, // 11  000  0101  0011  000
+    ERXFR_EL1         = 0xc2a0  // 11  000  0101  0100  000
   };
 
   enum SysRegWOValues {
@@ -1190,6 +1215,35 @@ namespace AArch64SysReg {
     SPSR_EL12         = 0xea00, // 11  101  0100  0000  000
     ELR_EL12          = 0xea01, // 11  101  0100  0000  001
 
+    // RAS extension registers
+    ERRSELR_EL1       = 0xc299, // 11  000  0101  0011  001
+    ERXCTLR_EL1       = 0xc2a1, // 11  000  0101  0100  001
+    ERXSTATUS_EL1     = 0xc2a2, // 11  000  0101  0100  010
+    ERXADDR_EL1       = 0xc2a3, // 11  000  0101  0100  011
+    ERXMISC0_EL1      = 0xc2a8, // 11  000  0101  0101  000
+    ERXMISC1_EL1      = 0xc2a9, // 11  000  0101  0101  001
+    DISR_EL1          = 0xc609, // 11  000  1100  0001  001
+    VDISR_EL2         = 0xe609, // 11  100  1100  0001  001
+    VSESR_EL2         = 0xe293, // 11  100  0101  0010  011
+
+    // v8.2a registers
+    UAO               = 0xc214, // 11  000  0100  0010  100
+
+    // v8.2a "Statistical Profiling extension" registers
+    PMBLIMITR_EL1     = 0xc4d0, // 11  000  1001  1010  000
+    PMBPTR_EL1        = 0xc4d1, // 11  000  1001  1010  001
+    PMBSR_EL1         = 0xc4d3, // 11  000  1001  1010  011
+    PMBIDR_EL1        = 0xc4d7, // 11  000  1001  1010  111
+    PMSCR_EL2         = 0xe4c8, // 11  100  1001  1001  000
+    PMSCR_EL12        = 0xecc8, // 11  101  1001  1001  000
+    PMSCR_EL1         = 0xc4c8, // 11  000  1001  1001  000
+    PMSICR_EL1        = 0xc4ca, // 11  000  1001  1001  010
+    PMSIRR_EL1        = 0xc4cb, // 11  000  1001  1001  011
+    PMSFCR_EL1        = 0xc4cc, // 11  000  1001  1001  100
+    PMSEVFR_EL1       = 0xc4cd, // 11  000  1001  1001  101
+    PMSLATFR_EL1      = 0xc4ce, // 11  000  1001  1001  110
+    PMSIDR_EL1        = 0xc4cf, // 11  000  1001  1001  111
+
     // Cyclone specific system registers
     CPM_IOACC_CTL_EL3 = 0xff90,
   };
@@ -1283,7 +1337,7 @@ namespace AArch64TLBI {
       return true;
     }
   }
-} 
+}
 
 namespace AArch64II {
   /// Target Operand Flag enum.
@@ -1340,12 +1394,7 @@ namespace AArch64II {
     /// thread-local symbol. On Darwin, only one type of thread-local access
     /// exists (pre linker-relaxation), but on ELF the TLSModel used for the
     /// referee will affect interpretation.
-    MO_TLS = 0x40,
-
-    /// MO_CONSTPOOL - This flag indicates that a symbol operand represents
-    /// the address of a constant pool entry for the symbol, rather than the
-    /// address of the symbol itself.
-    MO_CONSTPOOL = 0x80
+    MO_TLS = 0x40
   };
 } // end namespace AArch64II
 

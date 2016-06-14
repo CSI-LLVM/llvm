@@ -145,9 +145,9 @@ void StackSlotColoring::ScanForSpillSlotRefs(MachineFunction &MF) {
     MachineBasicBlock *MBB = &*MBBI;
     for (MachineBasicBlock::iterator MII = MBB->begin(), EE = MBB->end();
          MII != EE; ++MII) {
-      MachineInstr *MI = &*MII;
-      for (unsigned i = 0, e = MI->getNumOperands(); i != e; ++i) {
-        MachineOperand &MO = MI->getOperand(i);
+      MachineInstr &MI = *MII;
+      for (unsigned i = 0, e = MI.getNumOperands(); i != e; ++i) {
+        MachineOperand &MO = MI.getOperand(i);
         if (!MO.isFI())
           continue;
         int FI = MO.getIndex();
@@ -156,11 +156,12 @@ void StackSlotColoring::ScanForSpillSlotRefs(MachineFunction &MF) {
         if (!LS->hasInterval(FI))
           continue;
         LiveInterval &li = LS->getInterval(FI);
-        if (!MI->isDebugValue())
+        if (!MI.isDebugValue())
           li.weight += LiveIntervals::getSpillWeight(false, true, MBFI, MI);
       }
-      for (MachineInstr::mmo_iterator MMOI = MI->memoperands_begin(),
-           EE = MI->memoperands_end(); MMOI != EE; ++MMOI) {
+      for (MachineInstr::mmo_iterator MMOI = MI.memoperands_begin(),
+                                      EE = MI.memoperands_end();
+           MMOI != EE; ++MMOI) {
         MachineMemOperand *MMO = *MMOI;
         if (const FixedStackPseudoSourceValue *FSV =
             dyn_cast_or_null<FixedStackPseudoSourceValue>(
@@ -318,7 +319,7 @@ bool StackSlotColoring::ColorSlots(MachineFunction &MF) {
     if (NewFI == -1 || (NewFI == (int)SS))
       continue;
 
-    const PseudoSourceValue *NewSV = PseudoSourceValue::getFixedStack(NewFI);
+    const PseudoSourceValue *NewSV = MF.getPSVManager().getFixedStack(NewFI);
     SmallVectorImpl<MachineMemOperand *> &RefMMOs = SSRefs[SS];
     for (unsigned i = 0, e = RefMMOs.size(); i != e; ++i)
       RefMMOs[i]->setValue(NewSV);

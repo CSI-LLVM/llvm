@@ -8,7 +8,7 @@
 //===----------------------------------------------------------------------===//
 //
 // Defines an interface to a lib.exe-compatible driver that also understands
-// bitcode files. Used by llvm-lib and lld-link2 /lib.
+// bitcode files. Used by llvm-lib and lld-link /lib.
 //
 //===----------------------------------------------------------------------===//
 
@@ -51,7 +51,7 @@ static const llvm::opt::OptTable::Info infoTable[] = {
 
 class LibOptTable : public llvm::opt::OptTable {
 public:
-  LibOptTable() : OptTable(infoTable, llvm::array_lengthof(infoTable), true) {}
+  LibOptTable() : OptTable(infoTable, true) {}
 };
 
 }
@@ -102,7 +102,7 @@ static Optional<std::string> findInputFile(StringRef File,
 int llvm::libDriverMain(llvm::ArrayRef<const char*> ArgsArr) {
   SmallVector<const char *, 20> NewArgs(ArgsArr.begin(), ArgsArr.end());
   BumpPtrAllocator Alloc;
-  BumpPtrStringSaver Saver(Alloc);
+  StringSaver Saver(Alloc);
   cl::ExpandResponseFiles(Saver, cl::TokenizeWindowsCommandLine, NewArgs);
   ArgsArr = NewArgs;
 
@@ -122,8 +122,8 @@ int llvm::libDriverMain(llvm::ArrayRef<const char*> ArgsArr) {
     llvm::errs() << "ignoring unknown argument: " << Arg->getSpelling() << "\n";
 
   if (Args.filtered_begin(OPT_INPUT) == Args.filtered_end()) {
-    llvm::errs() << "no input files.\n";
-    return 1;
+    // No input files.  To match lib.exe, silently do nothing.
+    return 0;
   }
 
   std::vector<StringRef> SearchPaths = getSearchPaths(&Args, Saver);

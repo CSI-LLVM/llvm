@@ -17,13 +17,19 @@
 #include "CompilandDumper.h"
 #include "ExternalSymbolDumper.h"
 #include "FunctionDumper.h"
+#include "LLVMOutputStyle.h"
 #include "LinePrinter.h"
+#include "OutputStyle.h"
 #include "TypeDumper.h"
 #include "VariableDumper.h"
+#include "YAMLOutputStyle.h"
 
 #include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/BitVector.h"
+#include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/StringExtras.h"
 #include "llvm/Config/config.h"
+#include "llvm/DebugInfo/PDB/GenericError.h"
 #include "llvm/DebugInfo/PDB/IPDBEnumChildren.h"
 #include "llvm/DebugInfo/PDB/IPDBRawSymbol.h"
 #include "llvm/DebugInfo/PDB/IPDBSession.h"
@@ -33,21 +39,26 @@
 #include "llvm/DebugInfo/PDB/PDBSymbolExe.h"
 #include "llvm/DebugInfo/PDB/PDBSymbolFunc.h"
 #include "llvm/DebugInfo/PDB/PDBSymbolThunk.h"
+#include "llvm/DebugInfo/PDB/Raw/PDBFile.h"
+#include "llvm/DebugInfo/PDB/Raw/RawConstants.h"
+#include "llvm/DebugInfo/PDB/Raw/RawError.h"
+#include "llvm/DebugInfo/PDB/Raw/RawSession.h"
+#include "llvm/Support/COM.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/ConvertUTF.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/Format.h"
 #include "llvm/Support/ManagedStatic.h"
+#include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/PrettyStackTrace.h"
 #include "llvm/Support/Process.h"
-#include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/ScopedPrinter.h"
 #include "llvm/Support/Signals.h"
-
-#if defined(HAVE_DIA_SDK)
-#include <Windows.h>
-#endif
+#include "llvm/Support/raw_ostream.h"
 
 using namespace llvm;
+using namespace llvm::codeview;
+using namespace llvm::pdb;
 
 namespace opts {
 
@@ -60,6 +71,7 @@ cl::list<std::string> InputFilenames(cl::Positional,
 cl::OptionCategory TypeCategory("Symbol Type Options");
 cl::OptionCategory FilterCategory("Filtering Options");
 cl::OptionCategory OtherOptions("Other Options");
+cl::OptionCategory NativeOptions("Native Options");
 
 cl::opt<bool> Compilands("compilands", cl::desc("Display compilands"),
                          cl::cat(TypeCategory));
@@ -70,6 +82,7 @@ cl::opt<bool> Globals("globals", cl::desc("Dump global symbols"),
 cl::opt<bool> Externals("externals", cl::desc("Dump external symbols"),
                         cl::cat(TypeCategory));
 cl::opt<bool> Types("types", cl::desc("Display types"), cl::cat(TypeCategory));
+cl::opt<bool> Lines("lines", cl::desc("Line tables"), cl::cat(TypeCategory));
 cl::opt<bool>
     All("all", cl::desc("Implies all other options in 'Symbol Types' category"),
         cl::cat(TypeCategory));
@@ -78,6 +91,77 @@ cl::opt<uint64_t> LoadAddress(
     "load-address",
     cl::desc("Assume the module is loaded at the specified address"),
     cl::cat(OtherOptions));
+
+cl::opt<OutputStyleTy>
+    RawOutputStyle("raw-output-style", cl::desc("Specify dump outpout style"),
+                   cl::values(clEnumVal(LLVM, "LLVM default style"),
+                              clEnumVal(YAML, "YAML style"), clEnumValEnd),
+                   cl::init(LLVM), cl::cat(NativeOptions));
+
+cl::opt<bool> DumpHeaders("raw-headers", cl::desc("dump PDB headers"),
+                          cl::cat(NativeOptions));
+cl::opt<bool> DumpStreamBlocks("raw-stream-blocks",
+                               cl::desc("dump PDB stream blocks"),
+                               cl::cat(NativeOptions));
+cl::opt<bool> DumpStreamSummary("raw-stream-summary",
+                                cl::desc("dump summary of the PDB streams"),
+                                cl::cat(NativeOptions));
+cl::opt<bool>
+    DumpTpiRecords("raw-tpi-records",
+                   cl::desc("dump CodeView type records from TPI stream"),
+                   cl::cat(NativeOptions));
+cl::opt<bool> DumpTpiRecordBytes(
+    "raw-tpi-record-bytes",
+    cl::desc("dump CodeView type record raw bytes from TPI stream"),
+    cl::cat(NativeOptions));
+cl::opt<bool> DumpTpiHash("raw-tpi-hash",
+                          cl::desc("dump CodeView TPI hash stream"),
+                          cl::cat(NativeOptions));
+cl::opt<bool>
+    DumpIpiRecords("raw-ipi-records",
+                   cl::desc("dump CodeView type records from IPI stream"),
+                   cl::cat(NativeOptions));
+cl::opt<bool> DumpIpiRecordBytes(
+    "raw-ipi-record-bytes",
+    cl::desc("dump CodeView type record raw bytes from IPI stream"),
+    cl::cat(NativeOptions));
+cl::opt<std::string> DumpStreamDataIdx("raw-stream",
+                                       cl::desc("dump stream data"),
+                                       cl::cat(NativeOptions));
+cl::opt<std::string> DumpStreamDataName("raw-stream-name",
+                                        cl::desc("dump stream data"),
+                                        cl::cat(NativeOptions));
+cl::opt<bool> DumpModules("raw-modules", cl::desc("dump compiland information"),
+                          cl::cat(NativeOptions));
+cl::opt<bool> DumpModuleFiles("raw-module-files",
+                              cl::desc("dump file information"),
+                              cl::cat(NativeOptions));
+cl::opt<bool> DumpModuleSyms("raw-module-syms", cl::desc("dump module symbols"),
+                             cl::cat(NativeOptions));
+cl::opt<bool> DumpPublics("raw-publics", cl::desc("dump Publics stream data"),
+                          cl::cat(NativeOptions));
+cl::opt<bool> DumpSectionContribs("raw-section-contribs",
+                                  cl::desc("dump section contributions"),
+                                  cl::cat(NativeOptions));
+cl::opt<bool> DumpLineInfo("raw-line-info",
+                           cl::desc("dump file and line information"),
+                           cl::cat(NativeOptions));
+cl::opt<bool> DumpSectionMap("raw-section-map", cl::desc("dump section map"),
+                             cl::cat(NativeOptions));
+cl::opt<bool>
+    DumpSymRecordBytes("raw-sym-record-bytes",
+                       cl::desc("dump CodeView symbol record raw bytes"),
+                       cl::cat(NativeOptions));
+cl::opt<bool> DumpSectionHeaders("raw-section-headers",
+                                 cl::desc("dump section headers"),
+                                 cl::cat(NativeOptions));
+cl::opt<bool> DumpFpo("raw-fpo", cl::desc("dump FPO records"),
+                      cl::cat(NativeOptions));
+
+cl::opt<bool>
+    RawAll("raw-all",
+           cl::desc("Implies most other options in 'Native Options' category"),
+           cl::cat(NativeOptions));
 
 cl::list<std::string>
     ExcludeTypes("exclude-types",
@@ -91,6 +175,20 @@ cl::list<std::string>
     ExcludeCompilands("exclude-compilands",
                       cl::desc("Exclude compilands by regular expression"),
                       cl::ZeroOrMore, cl::cat(FilterCategory));
+
+cl::list<std::string> IncludeTypes(
+    "include-types",
+    cl::desc("Include only types which match a regular expression"),
+    cl::ZeroOrMore, cl::cat(FilterCategory));
+cl::list<std::string> IncludeSymbols(
+    "include-symbols",
+    cl::desc("Include only symbols which match a regular expression"),
+    cl::ZeroOrMore, cl::cat(FilterCategory));
+cl::list<std::string> IncludeCompilands(
+    "include-compilands",
+    cl::desc("Include only compilands those which match a regular expression"),
+    cl::ZeroOrMore, cl::cat(FilterCategory));
+
 cl::opt<bool> ExcludeCompilerGenerated(
     "no-compiler-generated",
     cl::desc("Don't show compiler generated types and symbols"),
@@ -107,29 +205,120 @@ cl::opt<bool> NoEnumDefs("no-enum-definitions",
                          cl::cat(FilterCategory));
 }
 
+static ExitOnError ExitOnErr;
+
+static Error dumpStructure(RawSession &RS) {
+  PDBFile &File = RS.getPDBFile();
+  std::unique_ptr<OutputStyle> O;
+  if (opts::RawOutputStyle == opts::OutputStyleTy::LLVM)
+    O = llvm::make_unique<LLVMOutputStyle>(File);
+  else if (opts::RawOutputStyle == opts::OutputStyleTy::YAML)
+    O = llvm::make_unique<YAMLOutputStyle>(File);
+  else
+    return make_error<RawError>(raw_error_code::feature_unsupported,
+                                "Requested output style unsupported");
+
+  if (auto EC = O->dumpFileHeaders())
+    return EC;
+
+  if (auto EC = O->dumpStreamSummary())
+    return EC;
+
+  if (auto EC = O->dumpStreamBlocks())
+    return EC;
+
+  if (auto EC = O->dumpStreamData())
+    return EC;
+
+  if (auto EC = O->dumpInfoStream())
+    return EC;
+
+  if (auto EC = O->dumpNamedStream())
+    return EC;
+
+  if (auto EC = O->dumpTpiStream(StreamTPI))
+    return EC;
+
+  if (auto EC = O->dumpTpiStream(StreamIPI))
+    return EC;
+
+  if (auto EC = O->dumpDbiStream())
+    return EC;
+
+  if (auto EC = O->dumpSectionContribs())
+    return EC;
+
+  if (auto EC = O->dumpSectionMap())
+    return EC;
+
+  if (auto EC = O->dumpPublicsStream())
+    return EC;
+
+  if (auto EC = O->dumpSectionHeaders())
+    return EC;
+
+  if (auto EC = O->dumpFpoStream())
+    return EC;
+  O->flush();
+  return Error::success();
+}
+
+bool isRawDumpEnabled() {
+  if (opts::DumpHeaders)
+    return true;
+  if (opts::DumpModules)
+    return true;
+  if (opts::DumpModuleFiles)
+    return true;
+  if (opts::DumpModuleSyms)
+    return true;
+  if (!opts::DumpStreamDataIdx.empty())
+    return true;
+  if (!opts::DumpStreamDataName.empty())
+    return true;
+  if (opts::DumpPublics)
+    return true;
+  if (opts::DumpStreamSummary)
+    return true;
+  if (opts::DumpStreamBlocks)
+    return true;
+  if (opts::DumpSymRecordBytes)
+    return true;
+  if (opts::DumpTpiRecordBytes)
+    return true;
+  if (opts::DumpTpiRecords)
+    return true;
+  if (opts::DumpTpiHash)
+    return true;
+  if (opts::DumpIpiRecords)
+    return true;
+  if (opts::DumpIpiRecordBytes)
+    return true;
+  if (opts::DumpSectionHeaders)
+    return true;
+  if (opts::DumpSectionContribs)
+    return true;
+  if (opts::DumpSectionMap)
+    return true;
+  if (opts::DumpLineInfo)
+    return true;
+  if (opts::DumpFpo)
+    return true;
+  return false;
+}
+
 static void dumpInput(StringRef Path) {
   std::unique_ptr<IPDBSession> Session;
-  PDB_ErrorCode Error =
-      llvm::loadDataForPDB(PDB_ReaderType::DIA, Path, Session);
-  switch (Error) {
-  case PDB_ErrorCode::Success:
-    break;
-  case PDB_ErrorCode::NoPdbImpl:
-    outs() << "Reading PDBs is not supported on this platform.\n";
-    return;
-  case PDB_ErrorCode::InvalidPath:
-    outs() << "Unable to load PDB at '" << Path
-           << "'.  Check that the file exists and is readable.\n";
-    return;
-  case PDB_ErrorCode::InvalidFileFormat:
-    outs() << "Unable to load PDB at '" << Path
-           << "'.  The file has an unrecognized format.\n";
-    return;
-  default:
-    outs() << "Unable to load PDB at '" << Path
-           << "'.  An unknown error occured.\n";
+  if (isRawDumpEnabled()) {
+    ExitOnErr(loadDataForPDB(PDB_ReaderType::Raw, Path, Session));
+
+    RawSession *RS = static_cast<RawSession *>(Session.get());
+    ExitOnErr(dumpStructure(*RS));
     return;
   }
+
+  ExitOnErr(loadDataForPDB(PDB_ReaderType::DIA, Path, Session));
+
   if (opts::LoadAddress)
     Session->setLoadAddress(opts::LoadAddress);
 
@@ -145,7 +334,7 @@ static void dumpInput(StringRef Path) {
 
   Printer.NewLine();
   WithColor(Printer, PDB_ColorItem::Identifier).get() << "Size";
-  if (!llvm::sys::fs::file_size(FileName, FileSize)) {
+  if (!sys::fs::file_size(FileName, FileSize)) {
     Printer << ": " << FileSize << " bytes";
   } else {
     Printer << ": (Unable to obtain file size)";
@@ -175,8 +364,11 @@ static void dumpInput(StringRef Path) {
     Printer.Indent();
     auto Compilands = GlobalScope->findAllChildren<PDBSymbolCompiland>();
     CompilandDumper Dumper(Printer);
+    CompilandDumpFlags options = CompilandDumper::Flags::None;
+    if (opts::Lines)
+      options = options | CompilandDumper::Flags::Lines;
     while (auto Compiland = Compilands->getNext())
-      Dumper.start(*Compiland, false);
+      Dumper.start(*Compiland, options);
     Printer.Unindent();
   }
 
@@ -233,52 +425,78 @@ static void dumpInput(StringRef Path) {
     ExternalSymbolDumper Dumper(Printer);
     Dumper.start(*GlobalScope);
   }
+  if (opts::Lines) {
+    Printer.NewLine();
+  }
   outs().flush();
 }
 
 int main(int argc_, const char *argv_[]) {
   // Print a stack trace if we signal out.
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv_[0]);
   PrettyStackTraceProgram X(argc_, argv_);
 
+  ExitOnErr.setBanner("llvm-pdbdump: ");
+
   SmallVector<const char *, 256> argv;
-  llvm::SpecificBumpPtrAllocator<char> ArgAllocator;
-  std::error_code EC = llvm::sys::Process::GetArgumentVector(
-      argv, llvm::makeArrayRef(argv_, argc_), ArgAllocator);
-  if (EC) {
-    llvm::errs() << "error: couldn't get arguments: " << EC.message() << '\n';
-    return 1;
-  }
+  SpecificBumpPtrAllocator<char> ArgAllocator;
+  ExitOnErr(errorCodeToError(sys::Process::GetArgumentVector(
+      argv, makeArrayRef(argv_, argc_), ArgAllocator)));
 
   llvm_shutdown_obj Y; // Call llvm_shutdown() on exit.
 
   cl::ParseCommandLineOptions(argv.size(), argv.data(), "LLVM PDB Dumper\n");
+  if (opts::Lines)
+    opts::Compilands = true;
+
   if (opts::All) {
     opts::Compilands = true;
     opts::Symbols = true;
     opts::Globals = true;
     opts::Types = true;
     opts::Externals = true;
+    opts::Lines = true;
   }
+
+  if (opts::RawAll) {
+    opts::DumpHeaders = true;
+    opts::DumpModules = true;
+    opts::DumpModuleFiles = true;
+    opts::DumpModuleSyms = true;
+    opts::DumpPublics = true;
+    opts::DumpSectionHeaders = true;
+    opts::DumpStreamSummary = true;
+    opts::DumpStreamBlocks = true;
+    opts::DumpTpiRecords = true;
+    opts::DumpTpiHash = true;
+    opts::DumpIpiRecords = true;
+    opts::DumpSectionMap = true;
+    opts::DumpSectionContribs = true;
+    opts::DumpLineInfo = true;
+    opts::DumpFpo = true;
+  }
+
+  // When adding filters for excluded compilands and types, we need to remember
+  // that these are regexes.  So special characters such as * and \ need to be
+  // escaped in the regex.  In the case of a literal \, this means it needs to
+  // be escaped again in the C++.  So matching a single \ in the input requires
+  // 4 \es in the C++.
   if (opts::ExcludeCompilerGenerated) {
     opts::ExcludeTypes.push_back("__vc_attributes");
-    opts::ExcludeCompilands.push_back("* Linker *");
+    opts::ExcludeCompilands.push_back("\\* Linker \\*");
   }
   if (opts::ExcludeSystemLibraries) {
     opts::ExcludeCompilands.push_back(
-        "f:\\binaries\\Intermediate\\vctools\\crt_bld");
+        "f:\\\\binaries\\\\Intermediate\\\\vctools\\\\crt_bld");
+    opts::ExcludeCompilands.push_back("f:\\\\dd\\\\vctools\\\\crt");
+    opts::ExcludeCompilands.push_back("d:\\\\th.obj.x86fre\\\\minkernel");
   }
 
-#if defined(HAVE_DIA_SDK)
-  CoInitializeEx(nullptr, COINIT_MULTITHREADED);
-#endif
+  llvm::sys::InitializeCOMRAII COM(llvm::sys::COMThreadingMode::MultiThreaded);
 
   std::for_each(opts::InputFilenames.begin(), opts::InputFilenames.end(),
                 dumpInput);
 
-#if defined(HAVE_DIA_SDK)
-  CoUninitialize();
-#endif
-
+  outs().flush();
   return 0;
 }

@@ -793,7 +793,7 @@ static SDValue performSUBECombine(SDNode *N, SelectionDAG &DAG,
   return SDValue();
 }
 
-static SDValue genConstMult(SDValue X, uint64_t C, SDLoc DL, EVT VT,
+static SDValue genConstMult(SDValue X, uint64_t C, const SDLoc &DL, EVT VT,
                             EVT ShiftTy, SelectionDAG &DAG) {
   // Clear the upper (64 - VT.sizeInBits) bits.
   C &= ((uint64_t)-1) >> (64 - VT.getSizeInBits());
@@ -1181,6 +1181,10 @@ bool MipsSETargetLowering::isEligibleForTailCallOptimization(
   if (!EnableMipsTailCalls)
     return false;
 
+  // Exception has to be cleared with eret.
+  if (FI.isISR())
+    return false;
+
   // Return false if either the callee or caller has a byval argument.
   if (CCInfo.getInRegsParamsCount() > 0 || FI.hasByvalArg())
     return false;
@@ -1288,8 +1292,7 @@ SDValue MipsSETargetLowering::lowerMulDiv(SDValue Op, unsigned NewOpc,
   return DAG.getMergeValues(Vals, DL);
 }
 
-
-static SDValue initAccumulator(SDValue In, SDLoc DL, SelectionDAG &DAG) {
+static SDValue initAccumulator(SDValue In, const SDLoc &DL, SelectionDAG &DAG) {
   SDValue InLo = DAG.getNode(ISD::EXTRACT_ELEMENT, DL, MVT::i32, In,
                              DAG.getConstant(0, DL, MVT::i32));
   SDValue InHi = DAG.getNode(ISD::EXTRACT_ELEMENT, DL, MVT::i32, In,
@@ -1297,7 +1300,7 @@ static SDValue initAccumulator(SDValue In, SDLoc DL, SelectionDAG &DAG) {
   return DAG.getNode(MipsISD::MTLOHI, DL, MVT::Untyped, InLo, InHi);
 }
 
-static SDValue extractLOHI(SDValue Op, SDLoc DL, SelectionDAG &DAG) {
+static SDValue extractLOHI(SDValue Op, const SDLoc &DL, SelectionDAG &DAG) {
   SDValue Lo = DAG.getNode(MipsISD::MFLO, DL, MVT::i32, Op);
   SDValue Hi = DAG.getNode(MipsISD::MFHI, DL, MVT::i32, Op);
   return DAG.getNode(ISD::BUILD_PAIR, DL, MVT::i64, Lo, Hi);
@@ -1397,8 +1400,8 @@ static SDValue lowerMSASplatZExt(SDValue Op, unsigned OpNr, SelectionDAG &DAG) {
   SDValue Ops[16] = { LaneA, LaneB, LaneA, LaneB, LaneA, LaneB, LaneA, LaneB,
                       LaneA, LaneB, LaneA, LaneB, LaneA, LaneB, LaneA, LaneB };
 
-  SDValue Result = DAG.getNode(ISD::BUILD_VECTOR, DL, ViaVecTy,
-                       makeArrayRef(Ops, ViaVecTy.getVectorNumElements()));
+  SDValue Result = DAG.getBuildVector(
+      ViaVecTy, DL, makeArrayRef(Ops, ViaVecTy.getVectorNumElements()));
 
   if (ViaVecTy != ResVecTy)
     Result = DAG.getNode(ISD::BITCAST, DL, ResVecTy, Result);
@@ -1438,8 +1441,8 @@ static SDValue getBuildVectorSplat(EVT VecTy, SDValue SplatValue,
                       SplatValueA, SplatValueB, SplatValueA, SplatValueB,
                       SplatValueA, SplatValueB, SplatValueA, SplatValueB };
 
-  SDValue Result = DAG.getNode(ISD::BUILD_VECTOR, DL, ViaVecTy,
-                       makeArrayRef(Ops, ViaVecTy.getVectorNumElements()));
+  SDValue Result = DAG.getBuildVector(
+      ViaVecTy, DL, makeArrayRef(Ops, ViaVecTy.getVectorNumElements()));
 
   if (VecTy != ViaVecTy)
     Result = DAG.getNode(ISD::BITCAST, DL, VecTy, Result);
@@ -1467,10 +1470,10 @@ static SDValue lowerMSABinaryBitImmIntr(SDValue Op, SelectionDAG &DAG,
       if (BigEndian)
         std::swap(BitImmLoOp, BitImmHiOp);
 
-      Exp2Imm =
-          DAG.getNode(ISD::BITCAST, DL, MVT::v2i64,
-                      DAG.getNode(ISD::BUILD_VECTOR, DL, MVT::v4i32, BitImmLoOp,
-                                  BitImmHiOp, BitImmLoOp, BitImmHiOp));
+      Exp2Imm = DAG.getNode(
+          ISD::BITCAST, DL, MVT::v2i64,
+          DAG.getBuildVector(MVT::v4i32, DL,
+                             {BitImmLoOp, BitImmHiOp, BitImmLoOp, BitImmHiOp}));
     }
   }
 
@@ -1786,9 +1789,11 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
     return DAG.getNode(ISD::UDIV, DL, Op->getValueType(0), Op->getOperand(1),
                        Op->getOperand(2));
   case Intrinsic::mips_fadd_w:
-  case Intrinsic::mips_fadd_d:
+  case Intrinsic::mips_fadd_d: {
+    // TODO: If intrinsics have fast-math-flags, propagate them.
     return DAG.getNode(ISD::FADD, DL, Op->getValueType(0), Op->getOperand(1),
                        Op->getOperand(2));
+  }
   // Don't lower mips_fcaf_[wd] since LLVM folds SETFALSE condcodes away
   case Intrinsic::mips_fceq_w:
   case Intrinsic::mips_fceq_d:
@@ -1831,9 +1836,11 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
     return DAG.getSetCC(DL, Op->getValueType(0), Op->getOperand(1),
                         Op->getOperand(2), ISD::SETUNE);
   case Intrinsic::mips_fdiv_w:
-  case Intrinsic::mips_fdiv_d:
+  case Intrinsic::mips_fdiv_d: {
+    // TODO: If intrinsics have fast-math-flags, propagate them.
     return DAG.getNode(ISD::FDIV, DL, Op->getValueType(0), Op->getOperand(1),
                        Op->getOperand(2));
+  }
   case Intrinsic::mips_ffint_u_w:
   case Intrinsic::mips_ffint_u_d:
     return DAG.getNode(ISD::UINT_TO_FP, DL, Op->getValueType(0),
@@ -1852,10 +1859,11 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
 
     // If ResTy is v2i64 then the type legalizer will break this node down into
     // an equivalent v4i32.
-    return DAG.getNode(ISD::BUILD_VECTOR, DL, ResTy, Ops);
+    return DAG.getBuildVector(ResTy, DL, Ops);
   }
   case Intrinsic::mips_fexp2_w:
   case Intrinsic::mips_fexp2_d: {
+    // TODO: If intrinsics have fast-math-flags, propagate them.
     EVT ResTy = Op->getValueType(0);
     return DAG.getNode(
         ISD::FMUL, SDLoc(Op), ResTy, Op->getOperand(1),
@@ -1869,11 +1877,14 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
     return DAG.getNode(ISD::FMA, SDLoc(Op), Op->getValueType(0),
                        Op->getOperand(1), Op->getOperand(2), Op->getOperand(3));
   case Intrinsic::mips_fmul_w:
-  case Intrinsic::mips_fmul_d:
+  case Intrinsic::mips_fmul_d: {
+    // TODO: If intrinsics have fast-math-flags, propagate them.
     return DAG.getNode(ISD::FMUL, DL, Op->getValueType(0), Op->getOperand(1),
                        Op->getOperand(2));
+  }
   case Intrinsic::mips_fmsub_w:
   case Intrinsic::mips_fmsub_d: {
+    // TODO: If intrinsics have fast-math-flags, propagate them.
     EVT ResTy = Op->getValueType(0);
     return DAG.getNode(ISD::FSUB, SDLoc(Op), ResTy, Op->getOperand(1),
                        DAG.getNode(ISD::FMUL, SDLoc(Op), ResTy,
@@ -1886,9 +1897,11 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
   case Intrinsic::mips_fsqrt_d:
     return DAG.getNode(ISD::FSQRT, DL, Op->getValueType(0), Op->getOperand(1));
   case Intrinsic::mips_fsub_w:
-  case Intrinsic::mips_fsub_d:
+  case Intrinsic::mips_fsub_d: {
+    // TODO: If intrinsics have fast-math-flags, propagate them.
     return DAG.getNode(ISD::FSUB, DL, Op->getValueType(0), Op->getOperand(1),
                        Op->getOperand(2));
+  }
   case Intrinsic::mips_ftrunc_u_w:
   case Intrinsic::mips_ftrunc_u_d:
     return DAG.getNode(ISD::FP_TO_UINT, DL, Op->getValueType(0),
@@ -2152,6 +2165,10 @@ SDValue MipsSETargetLowering::lowerINTRINSIC_WO_CHAIN(SDValue Op,
   case Intrinsic::mips_xori_b:
     return DAG.getNode(ISD::XOR, DL, Op->getValueType(0),
                        Op->getOperand(1), lowerMSASplatImm(Op, 2, DAG));
+  case Intrinsic::thread_pointer: {
+    EVT PtrVT = getPointerTy(DAG.getDataLayout());
+    return DAG.getNode(MipsISD::ThreadPointer, DL, PtrVT);
+  }
   }
 }
 
@@ -2297,7 +2314,7 @@ lowerEXTRACT_VECTOR_ELT(SDValue Op, SelectionDAG &DAG) const {
 }
 
 static bool isConstantOrUndef(const SDValue Op) {
-  if (Op->getOpcode() == ISD::UNDEF)
+  if (Op->isUndef())
     return true;
   if (isa<ConstantSDNode>(Op))
     return true;
@@ -2827,7 +2844,7 @@ static SDValue lowerVECTOR_SHUFFLE_VSHF(SDValue Op, EVT ResTy,
        ++I)
     Ops.push_back(DAG.getTargetConstant(*I, DL, MaskEltTy));
 
-  SDValue MaskVec = DAG.getNode(ISD::BUILD_VECTOR, DL, MaskVecTy, Ops);
+  SDValue MaskVec = DAG.getBuildVector(MaskVecTy, DL, Ops);
 
   if (Using1stVec && Using2ndVec) {
     Op0 = Op->getOperand(0);
@@ -2869,26 +2886,20 @@ SDValue MipsSETargetLowering::lowerVECTOR_SHUFFLE(SDValue Op,
   // MipsISD::VSHF.
   if (isVECTOR_SHUFFLE_SPLATI(Op, ResTy, Indices, DAG))
     return lowerVECTOR_SHUFFLE_VSHF(Op, ResTy, Indices, DAG);
-  SDValue Result = lowerVECTOR_SHUFFLE_ILVEV(Op, ResTy, Indices, DAG);
-  if (Result.getNode())
+  SDValue Result;
+  if ((Result = lowerVECTOR_SHUFFLE_ILVEV(Op, ResTy, Indices, DAG)))
     return Result;
-  Result = lowerVECTOR_SHUFFLE_ILVOD(Op, ResTy, Indices, DAG);
-  if (Result.getNode())
+  if ((Result = lowerVECTOR_SHUFFLE_ILVOD(Op, ResTy, Indices, DAG)))
     return Result;
-  Result = lowerVECTOR_SHUFFLE_ILVL(Op, ResTy, Indices, DAG);
-  if (Result.getNode())
+  if ((Result = lowerVECTOR_SHUFFLE_ILVL(Op, ResTy, Indices, DAG)))
     return Result;
-  Result = lowerVECTOR_SHUFFLE_ILVR(Op, ResTy, Indices, DAG);
-  if (Result.getNode())
+  if ((Result = lowerVECTOR_SHUFFLE_ILVR(Op, ResTy, Indices, DAG)))
     return Result;
-  Result = lowerVECTOR_SHUFFLE_PCKEV(Op, ResTy, Indices, DAG);
-  if (Result.getNode())
+  if ((Result = lowerVECTOR_SHUFFLE_PCKEV(Op, ResTy, Indices, DAG)))
     return Result;
-  Result = lowerVECTOR_SHUFFLE_PCKOD(Op, ResTy, Indices, DAG);
-  if (Result.getNode())
+  if ((Result = lowerVECTOR_SHUFFLE_PCKOD(Op, ResTy, Indices, DAG)))
     return Result;
-  Result = lowerVECTOR_SHUFFLE_SHF(Op, ResTy, Indices, DAG);
-  if (Result.getNode())
+  if ((Result = lowerVECTOR_SHUFFLE_SHF(Op, ResTy, Indices, DAG)))
     return Result;
   return lowerVECTOR_SHUFFLE_VSHF(Op, ResTy, Indices, DAG);
 }
@@ -2935,6 +2946,8 @@ emitBPOSGE32(MachineInstr *MI, MachineBasicBlock *BB) const{
 
   // Insert the real bposge32 instruction to $BB.
   BuildMI(BB, DL, TII->get(Mips::BPOSGE32)).addMBB(TBB);
+  // Insert the real bposge32c instruction to $BB.
+  BuildMI(BB, DL, TII->get(Mips::BPOSGE32C_MMR3)).addMBB(TBB);
 
   // Fill $FBB.
   unsigned VR2 = RegInfo.createVirtualRegister(RC);

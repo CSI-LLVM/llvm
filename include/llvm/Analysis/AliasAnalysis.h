@@ -38,23 +38,24 @@
 #ifndef LLVM_ANALYSIS_ALIASANALYSIS_H
 #define LLVM_ANALYSIS_ALIASANALYSIS_H
 
-#include "llvm/ADT/DenseMap.h"
 #include "llvm/IR/CallSite.h"
 #include "llvm/IR/Metadata.h"
+#include "llvm/IR/PassManager.h"
 #include "llvm/Analysis/MemoryLocation.h"
+#include "llvm/Analysis/TargetLibraryInfo.h"
 
 namespace llvm {
-
+class BasicAAResult;
 class LoadInst;
 class StoreInst;
 class VAArgInst;
 class DataLayout;
-class TargetLibraryInfo;
 class Pass;
 class AnalysisUsage;
 class MemTransferInst;
 class MemIntrinsic;
 class DominatorTree;
+class OrderedBasicBlock;
 
 /// The possible results of an alias query.
 ///
@@ -139,7 +140,7 @@ enum FunctionModRefBehavior {
   /// non-volatile loads and stores from objects pointed to by its
   /// pointer-typed arguments, with arbitrary offsets.
   ///
-  /// This property corresponds to the IntrReadWriteArgMem LLVM intrinsic flag.
+  /// This property corresponds to the IntrArgMemOnly LLVM intrinsic flag.
   FMRB_OnlyAccessesArgumentPointees = FMRL_ArgumentPointees | MRI_ModRef,
 
   /// This function does not perform any non-local stores or volatile loads,
@@ -155,40 +156,21 @@ enum FunctionModRefBehavior {
   FMRB_UnknownModRefBehavior = FMRL_Anywhere | MRI_ModRef
 };
 
-class AliasAnalysis {
-protected:
-  const DataLayout *DL;
-  const TargetLibraryInfo *TLI;
-
-private:
-  AliasAnalysis *AA;       // Previous Alias Analysis to chain to.
-
-protected:
-  /// InitializeAliasAnalysis - Subclasses must call this method to initialize
-  /// the AliasAnalysis interface before any other methods are called.  This is
-  /// typically called by the run* methods of these subclasses.  This may be
-  /// called multiple times.
-  ///
-  void InitializeAliasAnalysis(Pass *P, const DataLayout *DL);
-
-  /// getAnalysisUsage - All alias analysis implementations should invoke this
-  /// directly (using AliasAnalysis::getAnalysisUsage(AU)).
-  virtual void getAnalysisUsage(AnalysisUsage &AU) const;
-
+class AAResults {
 public:
-  static char ID; // Class identification, replacement for typeinfo
-  AliasAnalysis() : DL(nullptr), TLI(nullptr), AA(nullptr) {}
-  virtual ~AliasAnalysis();  // We want to be subclassed
+  // Make these results default constructable and movable. We have to spell
+  // these out because MSVC won't synthesize them.
+  AAResults(const TargetLibraryInfo &TLI) : TLI(TLI) {}
+  AAResults(AAResults &&Arg);
+  ~AAResults();
 
-  /// getTargetLibraryInfo - Return a pointer to the current TargetLibraryInfo
-  /// object, or null if no TargetLibraryInfo object is available.
-  ///
-  const TargetLibraryInfo *getTargetLibraryInfo() const { return TLI; }
-
-  /// getTypeStoreSize - Return the DataLayout store size for the given type,
-  /// if known, or a conservative value otherwise.
-  ///
-  uint64_t getTypeStoreSize(Type *Ty);
+  /// Register a specific AA result.
+  template <typename AAResultT> void addAAResult(AAResultT &AAResult) {
+    // FIXME: We should use a much lighter weight system than the usual
+    // polymorphic pattern because we don't own AAResult. It should
+    // ideally involve two pointers and no separate allocation.
+    AAs.emplace_back(new Model<AAResultT>(AAResult, *this));
+  }
 
   //===--------------------------------------------------------------------===//
   /// \name Alias Queries
@@ -198,8 +180,7 @@ public:
   /// Returns an AliasResult indicating whether the two pointers are aliased to
   /// each other. This is the interface that must be implemented by specific
   /// alias analysis implementations.
-  virtual AliasResult alias(const MemoryLocation &LocA,
-                            const MemoryLocation &LocB);
+  AliasResult alias(const MemoryLocation &LocA, const MemoryLocation &LocB);
 
   /// A convenience wrapper around the primary \c alias interface.
   AliasResult alias(const Value *V1, uint64_t V1Size, const Value *V2,
@@ -243,8 +224,7 @@ public:
 
   /// Checks whether the given location points to constant memory, or if
   /// \p OrLocal is true whether it points to a local alloca.
-  virtual bool pointsToConstantMemory(const MemoryLocation &Loc,
-                                      bool OrLocal = false);
+  bool pointsToConstantMemory(const MemoryLocation &Loc, bool OrLocal = false);
 
   /// A convenience wrapper around the primary \c pointsToConstantMemory
   /// interface.
@@ -262,13 +242,13 @@ public:
   /// that these bits do not necessarily account for the overall behavior of
   /// the function, but rather only provide additional per-argument
   /// information.
-  virtual ModRefInfo getArgModRefInfo(ImmutableCallSite CS, unsigned ArgIdx);
+  ModRefInfo getArgModRefInfo(ImmutableCallSite CS, unsigned ArgIdx);
 
   /// Return the behavior of the given call site.
-  virtual FunctionModRefBehavior getModRefBehavior(ImmutableCallSite CS);
+  FunctionModRefBehavior getModRefBehavior(ImmutableCallSite CS);
 
   /// Return the behavior when calling the given function.
-  virtual FunctionModRefBehavior getModRefBehavior(const Function *F);
+  FunctionModRefBehavior getModRefBehavior(const Function *F);
 
   /// Checks if the specified call is known to never read or write memory.
   ///
@@ -348,8 +328,7 @@ public:
 
   /// getModRefInfo (for call sites) - Return information about whether
   /// a particular call site modifies or reads the specified memory location.
-  virtual ModRefInfo getModRefInfo(ImmutableCallSite CS,
-                                   const MemoryLocation &Loc);
+  ModRefInfo getModRefInfo(ImmutableCallSite CS, const MemoryLocation &Loc);
 
   /// getModRefInfo (for call sites) - A convenience wrapper.
   ModRefInfo getModRefInfo(ImmutableCallSite CS, const Value *P,
@@ -440,6 +419,26 @@ public:
     return getModRefInfo(I, MemoryLocation(P, Size));
   }
 
+  /// getModRefInfo (for catchpads) - Return information about whether
+  /// a particular catchpad modifies or reads the specified memory location.
+  ModRefInfo getModRefInfo(const CatchPadInst *I, const MemoryLocation &Loc);
+
+  /// getModRefInfo (for catchpads) - A convenience wrapper.
+  ModRefInfo getModRefInfo(const CatchPadInst *I, const Value *P,
+                           uint64_t Size) {
+    return getModRefInfo(I, MemoryLocation(P, Size));
+  }
+
+  /// getModRefInfo (for catchrets) - Return information about whether
+  /// a particular catchret modifies or reads the specified memory location.
+  ModRefInfo getModRefInfo(const CatchReturnInst *I, const MemoryLocation &Loc);
+
+  /// getModRefInfo (for catchrets) - A convenience wrapper.
+  ModRefInfo getModRefInfo(const CatchReturnInst *I, const Value *P,
+                           uint64_t Size) {
+    return getModRefInfo(I, MemoryLocation(P, Size));
+  }
+
   /// Check whether or not an instruction may read or write memory (without
   /// regard to a specific location).
   ///
@@ -449,11 +448,11 @@ public:
   ModRefInfo getModRefInfo(const Instruction *I) {
     if (auto CS = ImmutableCallSite(I)) {
       auto MRB = getModRefBehavior(CS);
-      if (MRB & MRI_ModRef)
+      if ((MRB & MRI_ModRef) == MRI_ModRef)
         return MRI_ModRef;
-      else if (MRB & MRI_Ref)
+      if (MRB & MRI_Ref)
         return MRI_Ref;
-      else if (MRB & MRI_Mod)
+      if (MRB & MRI_Mod)
         return MRI_Mod;
       return MRI_NoModRef;
     }
@@ -480,6 +479,10 @@ public:
       return getModRefInfo((const AtomicRMWInst*)I, Loc);
     case Instruction::Call:   return getModRefInfo((const CallInst*)I,  Loc);
     case Instruction::Invoke: return getModRefInfo((const InvokeInst*)I,Loc);
+    case Instruction::CatchPad:
+      return getModRefInfo((const CatchPadInst *)I, Loc);
+    case Instruction::CatchRet:
+      return getModRefInfo((const CatchReturnInst *)I, Loc);
     default:
       return MRI_NoModRef;
     }
@@ -498,19 +501,21 @@ public:
   /// Return information about whether two call sites may refer to the same set
   /// of memory locations. See the AA documentation for details:
   ///   http://llvm.org/docs/AliasAnalysis.html#ModRefInfo
-  virtual ModRefInfo getModRefInfo(ImmutableCallSite CS1,
-                                   ImmutableCallSite CS2);
+  ModRefInfo getModRefInfo(ImmutableCallSite CS1, ImmutableCallSite CS2);
 
-  /// Return information about whether a particular call site modifies or reads
-  /// the specified memory location.
+  /// \brief Return information about whether a particular call site modifies
+  /// or reads the specified memory location \p MemLoc before instruction \p I
+  /// in a BasicBlock. A ordered basic block \p OBB can be used to speed up
+  /// instruction ordering queries inside the BasicBlock containing \p I.
   ModRefInfo callCapturesBefore(const Instruction *I,
-                                const MemoryLocation &MemLoc,
-                                DominatorTree *DT);
+                                const MemoryLocation &MemLoc, DominatorTree *DT,
+                                OrderedBasicBlock *OBB = nullptr);
 
-  /// A convenience wrapper to synthesize a memory location.
+  /// \brief A convenience wrapper to synthesize a memory location.
   ModRefInfo callCapturesBefore(const Instruction *I, const Value *P,
-                                uint64_t Size, DominatorTree *DT) {
-    return callCapturesBefore(I, MemoryLocation(P, Size), DT);
+                                uint64_t Size, DominatorTree *DT,
+                                OrderedBasicBlock *OBB = nullptr) {
+    return callCapturesBefore(I, MemoryLocation(P, Size), DT, OBB);
   }
 
   /// @}
@@ -543,18 +548,269 @@ public:
                                  const ModRefInfo Mode) {
     return canInstructionRangeModRef(I1, I2, MemoryLocation(Ptr, Size), Mode);
   }
+
+private:
+  class Concept;
+  template <typename T> class Model;
+
+  template <typename T> friend class AAResultBase;
+
+  const TargetLibraryInfo &TLI;
+
+  std::vector<std::unique_ptr<Concept>> AAs;
 };
 
-/// isNoAliasCall - Return true if this pointer is returned by a noalias
-/// function.
+/// Temporary typedef for legacy code that uses a generic \c AliasAnalysis
+/// pointer or reference.
+typedef AAResults AliasAnalysis;
+
+/// A private abstract base class describing the concept of an individual alias
+/// analysis implementation.
+///
+/// This interface is implemented by any \c Model instantiation. It is also the
+/// interface which a type used to instantiate the model must provide.
+///
+/// All of these methods model methods by the same name in the \c
+/// AAResults class. Only differences and specifics to how the
+/// implementations are called are documented here.
+class AAResults::Concept {
+public:
+  virtual ~Concept() = 0;
+
+  /// An update API used internally by the AAResults to provide
+  /// a handle back to the top level aggregation.
+  virtual void setAAResults(AAResults *NewAAR) = 0;
+
+  //===--------------------------------------------------------------------===//
+  /// \name Alias Queries
+  /// @{
+
+  /// The main low level interface to the alias analysis implementation.
+  /// Returns an AliasResult indicating whether the two pointers are aliased to
+  /// each other. This is the interface that must be implemented by specific
+  /// alias analysis implementations.
+  virtual AliasResult alias(const MemoryLocation &LocA,
+                            const MemoryLocation &LocB) = 0;
+
+  /// Checks whether the given location points to constant memory, or if
+  /// \p OrLocal is true whether it points to a local alloca.
+  virtual bool pointsToConstantMemory(const MemoryLocation &Loc,
+                                      bool OrLocal) = 0;
+
+  /// @}
+  //===--------------------------------------------------------------------===//
+  /// \name Simple mod/ref information
+  /// @{
+
+  /// Get the ModRef info associated with a pointer argument of a callsite. The
+  /// result's bits are set to indicate the allowed aliasing ModRef kinds. Note
+  /// that these bits do not necessarily account for the overall behavior of
+  /// the function, but rather only provide additional per-argument
+  /// information.
+  virtual ModRefInfo getArgModRefInfo(ImmutableCallSite CS,
+                                      unsigned ArgIdx) = 0;
+
+  /// Return the behavior of the given call site.
+  virtual FunctionModRefBehavior getModRefBehavior(ImmutableCallSite CS) = 0;
+
+  /// Return the behavior when calling the given function.
+  virtual FunctionModRefBehavior getModRefBehavior(const Function *F) = 0;
+
+  /// getModRefInfo (for call sites) - Return information about whether
+  /// a particular call site modifies or reads the specified memory location.
+  virtual ModRefInfo getModRefInfo(ImmutableCallSite CS,
+                                   const MemoryLocation &Loc) = 0;
+
+  /// Return information about whether two call sites may refer to the same set
+  /// of memory locations. See the AA documentation for details:
+  ///   http://llvm.org/docs/AliasAnalysis.html#ModRefInfo
+  virtual ModRefInfo getModRefInfo(ImmutableCallSite CS1,
+                                   ImmutableCallSite CS2) = 0;
+
+  /// @}
+};
+
+/// A private class template which derives from \c Concept and wraps some other
+/// type.
+///
+/// This models the concept by directly forwarding each interface point to the
+/// wrapped type which must implement a compatible interface. This provides
+/// a type erased binding.
+template <typename AAResultT> class AAResults::Model final : public Concept {
+  AAResultT &Result;
+
+public:
+  explicit Model(AAResultT &Result, AAResults &AAR) : Result(Result) {
+    Result.setAAResults(&AAR);
+  }
+  ~Model() override {}
+
+  void setAAResults(AAResults *NewAAR) override { Result.setAAResults(NewAAR); }
+
+  AliasResult alias(const MemoryLocation &LocA,
+                    const MemoryLocation &LocB) override {
+    return Result.alias(LocA, LocB);
+  }
+
+  bool pointsToConstantMemory(const MemoryLocation &Loc,
+                              bool OrLocal) override {
+    return Result.pointsToConstantMemory(Loc, OrLocal);
+  }
+
+  ModRefInfo getArgModRefInfo(ImmutableCallSite CS, unsigned ArgIdx) override {
+    return Result.getArgModRefInfo(CS, ArgIdx);
+  }
+
+  FunctionModRefBehavior getModRefBehavior(ImmutableCallSite CS) override {
+    return Result.getModRefBehavior(CS);
+  }
+
+  FunctionModRefBehavior getModRefBehavior(const Function *F) override {
+    return Result.getModRefBehavior(F);
+  }
+
+  ModRefInfo getModRefInfo(ImmutableCallSite CS,
+                           const MemoryLocation &Loc) override {
+    return Result.getModRefInfo(CS, Loc);
+  }
+
+  ModRefInfo getModRefInfo(ImmutableCallSite CS1,
+                           ImmutableCallSite CS2) override {
+    return Result.getModRefInfo(CS1, CS2);
+  }
+};
+
+/// A CRTP-driven "mixin" base class to help implement the function alias
+/// analysis results concept.
+///
+/// Because of the nature of many alias analysis implementations, they often
+/// only implement a subset of the interface. This base class will attempt to
+/// implement the remaining portions of the interface in terms of simpler forms
+/// of the interface where possible, and otherwise provide conservatively
+/// correct fallback implementations.
+///
+/// Implementors of an alias analysis should derive from this CRTP, and then
+/// override specific methods that they wish to customize. There is no need to
+/// use virtual anywhere, the CRTP base class does static dispatch to the
+/// derived type passed into it.
+template <typename DerivedT> class AAResultBase {
+  // Expose some parts of the interface only to the AAResults::Model
+  // for wrapping. Specifically, this allows the model to call our
+  // setAAResults method without exposing it as a fully public API.
+  friend class AAResults::Model<DerivedT>;
+
+  /// A pointer to the AAResults object that this AAResult is
+  /// aggregated within. May be null if not aggregated.
+  AAResults *AAR;
+
+  /// Helper to dispatch calls back through the derived type.
+  DerivedT &derived() { return static_cast<DerivedT &>(*this); }
+
+  /// A setter for the AAResults pointer, which is used to satisfy the
+  /// AAResults::Model contract.
+  void setAAResults(AAResults *NewAAR) { AAR = NewAAR; }
+
+protected:
+  /// This proxy class models a common pattern where we delegate to either the
+  /// top-level \c AAResults aggregation if one is registered, or to the
+  /// current result if none are registered.
+  class AAResultsProxy {
+    AAResults *AAR;
+    DerivedT &CurrentResult;
+
+  public:
+    AAResultsProxy(AAResults *AAR, DerivedT &CurrentResult)
+        : AAR(AAR), CurrentResult(CurrentResult) {}
+
+    AliasResult alias(const MemoryLocation &LocA, const MemoryLocation &LocB) {
+      return AAR ? AAR->alias(LocA, LocB) : CurrentResult.alias(LocA, LocB);
+    }
+
+    bool pointsToConstantMemory(const MemoryLocation &Loc, bool OrLocal) {
+      return AAR ? AAR->pointsToConstantMemory(Loc, OrLocal)
+                 : CurrentResult.pointsToConstantMemory(Loc, OrLocal);
+    }
+
+    ModRefInfo getArgModRefInfo(ImmutableCallSite CS, unsigned ArgIdx) {
+      return AAR ? AAR->getArgModRefInfo(CS, ArgIdx) : CurrentResult.getArgModRefInfo(CS, ArgIdx);
+    }
+
+    FunctionModRefBehavior getModRefBehavior(ImmutableCallSite CS) {
+      return AAR ? AAR->getModRefBehavior(CS) : CurrentResult.getModRefBehavior(CS);
+    }
+
+    FunctionModRefBehavior getModRefBehavior(const Function *F) {
+      return AAR ? AAR->getModRefBehavior(F) : CurrentResult.getModRefBehavior(F);
+    }
+
+    ModRefInfo getModRefInfo(ImmutableCallSite CS, const MemoryLocation &Loc) {
+      return AAR ? AAR->getModRefInfo(CS, Loc)
+                 : CurrentResult.getModRefInfo(CS, Loc);
+    }
+
+    ModRefInfo getModRefInfo(ImmutableCallSite CS1, ImmutableCallSite CS2) {
+      return AAR ? AAR->getModRefInfo(CS1, CS2) : CurrentResult.getModRefInfo(CS1, CS2);
+    }
+  };
+
+  explicit AAResultBase() {}
+
+  // Provide all the copy and move constructors so that derived types aren't
+  // constrained.
+  AAResultBase(const AAResultBase &Arg) {}
+  AAResultBase(AAResultBase &&Arg) {}
+
+  /// Get a proxy for the best AA result set to query at this time.
+  ///
+  /// When this result is part of a larger aggregation, this will proxy to that
+  /// aggregation. When this result is used in isolation, it will just delegate
+  /// back to the derived class's implementation.
+  ///
+  /// Note that callers of this need to take considerable care to not cause
+  /// performance problems when they use this routine, in the case of a large
+  /// number of alias analyses being aggregated, it can be expensive to walk
+  /// back across the chain.
+  AAResultsProxy getBestAAResults() { return AAResultsProxy(AAR, derived()); }
+
+public:
+  AliasResult alias(const MemoryLocation &LocA, const MemoryLocation &LocB) {
+    return MayAlias;
+  }
+
+  bool pointsToConstantMemory(const MemoryLocation &Loc, bool OrLocal) {
+    return false;
+  }
+
+  ModRefInfo getArgModRefInfo(ImmutableCallSite CS, unsigned ArgIdx) {
+    return MRI_ModRef;
+  }
+
+  FunctionModRefBehavior getModRefBehavior(ImmutableCallSite CS) {
+    return FMRB_UnknownModRefBehavior;
+  }
+
+  FunctionModRefBehavior getModRefBehavior(const Function *F) {
+    return FMRB_UnknownModRefBehavior;
+  }
+
+  ModRefInfo getModRefInfo(ImmutableCallSite CS, const MemoryLocation &Loc) {
+    return MRI_ModRef;
+  }
+
+  ModRefInfo getModRefInfo(ImmutableCallSite CS1, ImmutableCallSite CS2) {
+    return MRI_ModRef;
+  }
+};
+
+
+/// Return true if this pointer is returned by a noalias function.
 bool isNoAliasCall(const Value *V);
 
-/// isNoAliasArgument - Return true if this is an argument with the noalias
-/// attribute.
+/// Return true if this is an argument with the noalias attribute.
 bool isNoAliasArgument(const Value *V);
 
-/// isIdentifiedObject - Return true if this pointer refers to a distinct and
-/// identifiable object.  This returns true for:
+/// Return true if this pointer refers to a distinct and identifiable object.
+/// This returns true for:
 ///    Global Variables and Functions (but not Global Aliases)
 ///    Allocas
 ///    ByVal and NoAlias Arguments
@@ -562,12 +818,127 @@ bool isNoAliasArgument(const Value *V);
 ///
 bool isIdentifiedObject(const Value *V);
 
-/// isIdentifiedFunctionLocal - Return true if V is umabigously identified
-/// at the function-level. Different IdentifiedFunctionLocals can't alias.
+/// Return true if V is umabigously identified at the function-level.
+/// Different IdentifiedFunctionLocals can't alias.
 /// Further, an IdentifiedFunctionLocal can not alias with any function
 /// arguments other than itself, which is not necessarily true for
 /// IdentifiedObjects.
 bool isIdentifiedFunctionLocal(const Value *V);
+
+/// A manager for alias analyses.
+///
+/// This class can have analyses registered with it and when run, it will run
+/// all of them and aggregate their results into single AA results interface
+/// that dispatches across all of the alias analysis results available.
+///
+/// Note that the order in which analyses are registered is very significant.
+/// That is the order in which the results will be aggregated and queried.
+///
+/// This manager effectively wraps the AnalysisManager for registering alias
+/// analyses. When you register your alias analysis with this manager, it will
+/// ensure the analysis itself is registered with its AnalysisManager.
+class AAManager : public AnalysisInfoMixin<AAManager> {
+public:
+  typedef AAResults Result;
+
+  // This type hase value semantics. We have to spell these out because MSVC
+  // won't synthesize them.
+  AAManager() {}
+  AAManager(AAManager &&Arg) : ResultGetters(std::move(Arg.ResultGetters)) {}
+  AAManager(const AAManager &Arg) : ResultGetters(Arg.ResultGetters) {}
+  AAManager &operator=(AAManager &&RHS) {
+    ResultGetters = std::move(RHS.ResultGetters);
+    return *this;
+  }
+  AAManager &operator=(const AAManager &RHS) {
+    ResultGetters = RHS.ResultGetters;
+    return *this;
+  }
+
+  /// Register a specific AA result.
+  template <typename AnalysisT> void registerFunctionAnalysis() {
+    ResultGetters.push_back(&getFunctionAAResultImpl<AnalysisT>);
+  }
+
+  /// Register a specific AA result.
+  template <typename AnalysisT> void registerModuleAnalysis() {
+    ResultGetters.push_back(&getModuleAAResultImpl<AnalysisT>);
+  }
+
+  Result run(Function &F, AnalysisManager<Function> &AM) {
+    Result R(AM.getResult<TargetLibraryAnalysis>(F));
+    for (auto &Getter : ResultGetters)
+      (*Getter)(F, AM, R);
+    return R;
+  }
+
+private:
+  friend AnalysisInfoMixin<AAManager>;
+  static char PassID;
+
+  SmallVector<void (*)(Function &F, AnalysisManager<Function> &AM,
+                       AAResults &AAResults),
+              4> ResultGetters;
+
+  template <typename AnalysisT>
+  static void getFunctionAAResultImpl(Function &F,
+                                      AnalysisManager<Function> &AM,
+                                      AAResults &AAResults) {
+    AAResults.addAAResult(AM.template getResult<AnalysisT>(F));
+  }
+
+  template <typename AnalysisT>
+  static void getModuleAAResultImpl(Function &F, AnalysisManager<Function> &AM,
+                                    AAResults &AAResults) {
+    auto &MAM =
+        AM.getResult<ModuleAnalysisManagerFunctionProxy>(F).getManager();
+    if (auto *R = MAM.template getCachedResult<AnalysisT>(*F.getParent()))
+      AAResults.addAAResult(*R);
+  }
+};
+
+/// A wrapper pass to provide the legacy pass manager access to a suitably
+/// prepared AAResults object.
+class AAResultsWrapperPass : public FunctionPass {
+  std::unique_ptr<AAResults> AAR;
+
+public:
+  static char ID;
+
+  AAResultsWrapperPass();
+
+  AAResults &getAAResults() { return *AAR; }
+  const AAResults &getAAResults() const { return *AAR; }
+
+  bool runOnFunction(Function &F) override;
+
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
+};
+
+FunctionPass *createAAResultsWrapperPass();
+
+/// A wrapper pass around a callback which can be used to populate the
+/// AAResults in the AAResultsWrapperPass from an external AA.
+///
+/// The callback provided here will be used each time we prepare an AAResults
+/// object, and will receive a reference to the function wrapper pass, the
+/// function, and the AAResults object to populate. This should be used when
+/// setting up a custom pass pipeline to inject a hook into the AA results.
+ImmutablePass *createExternalAAWrapperPass(
+    std::function<void(Pass &, Function &, AAResults &)> Callback);
+
+/// A helper for the legacy pass manager to create a \c AAResults
+/// object populated to the best of our ability for a particular function when
+/// inside of a \c ModulePass or a \c CallGraphSCCPass.
+///
+/// If a \c ModulePass or a \c CallGraphSCCPass calls \p
+/// createLegacyPMAAResults, it also needs to call \p addUsedAAAnalyses in \p
+/// getAnalysisUsage.
+AAResults createLegacyPMAAResults(Pass &P, Function &F, BasicAAResult &BAR);
+
+/// A helper for the legacy pass manager to populate \p AU to add uses to make
+/// sure the analyses required by \p createLegacyPMAAResults are available.
+void getAAResultsAnalysisUsage(AnalysisUsage &AU);
 
 } // End llvm namespace
 

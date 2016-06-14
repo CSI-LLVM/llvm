@@ -12,24 +12,21 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_LIB_TARGET_R600_R600INSTRINFO_H
-#define LLVM_LIB_TARGET_R600_R600INSTRINFO_H
+#ifndef LLVM_LIB_TARGET_AMDGPU_R600INSTRINFO_H
+#define LLVM_LIB_TARGET_AMDGPU_R600INSTRINFO_H
 
 #include "AMDGPUInstrInfo.h"
 #include "R600Defines.h"
 #include "R600RegisterInfo.h"
-#include <map>
 
 namespace llvm {
-
   class AMDGPUTargetMachine;
   class DFAPacketizer;
-  class ScheduleDAG;
   class MachineFunction;
   class MachineInstr;
   class MachineInstrBuilder;
 
-  class R600InstrInfo : public AMDGPUInstrInfo {
+  class R600InstrInfo final : public AMDGPUInstrInfo {
   private:
   const R600RegisterInfo RI;
 
@@ -61,9 +58,8 @@ namespace llvm {
   explicit R600InstrInfo(const AMDGPUSubtarget &st);
 
   const R600RegisterInfo &getRegisterInfo() const override;
-  void copyPhysReg(MachineBasicBlock &MBB,
-                   MachineBasicBlock::iterator MI, DebugLoc DL,
-                   unsigned DestReg, unsigned SrcReg,
+  void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
+                   const DebugLoc &DL, unsigned DestReg, unsigned SrcReg,
                    bool KillSrc) const override;
   bool isLegalToSplitMBBAt(MachineBasicBlock &MBB,
                            MachineBasicBlock::iterator MBBI) const override;
@@ -152,7 +148,7 @@ namespace llvm {
   /// instruction slots within an instruction group.
   bool isVector(const MachineInstr &MI) const;
 
-  bool isMov(unsigned Opcode) const override;
+  bool isMov(unsigned Opcode) const;
 
   DFAPacketizer *
   CreateTargetScheduleState(const TargetSubtargetInfo &) const override;
@@ -164,31 +160,31 @@ namespace llvm {
 
   unsigned InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
                         MachineBasicBlock *FBB, ArrayRef<MachineOperand> Cond,
-                        DebugLoc DL) const override;
+                        const DebugLoc &DL) const override;
 
   unsigned RemoveBranch(MachineBasicBlock &MBB) const override;
 
-  bool isPredicated(const MachineInstr *MI) const override;
+  bool isPredicated(const MachineInstr &MI) const override;
 
-  bool isPredicable(MachineInstr *MI) const override;
+  bool isPredicable(MachineInstr &MI) const override;
 
   bool
    isProfitableToDupForIfCvt(MachineBasicBlock &MBB, unsigned NumCyles,
-                             const BranchProbability &Probability) const override;
+                             BranchProbability Probability) const override;
 
   bool isProfitableToIfCvt(MachineBasicBlock &MBB, unsigned NumCyles,
                            unsigned ExtraPredCycles,
-                           const BranchProbability &Probability) const override ;
+                           BranchProbability Probability) const override ;
 
   bool
    isProfitableToIfCvt(MachineBasicBlock &TMBB,
                        unsigned NumTCycles, unsigned ExtraTCycles,
                        MachineBasicBlock &FMBB,
                        unsigned NumFCycles, unsigned ExtraFCycles,
-                       const BranchProbability &Probability) const override;
+                       BranchProbability Probability) const override;
 
-  bool DefinesPredicate(MachineInstr *MI,
-                                  std::vector<MachineOperand> &Pred) const override;
+  bool DefinesPredicate(MachineInstr &MI,
+                        std::vector<MachineOperand> &Pred) const override;
 
   bool SubsumesPredicate(ArrayRef<MachineOperand> Pred1,
                          ArrayRef<MachineOperand> Pred2) const override;
@@ -196,10 +192,10 @@ namespace llvm {
   bool isProfitableToUnpredicate(MachineBasicBlock &TMBB,
                                           MachineBasicBlock &FMBB) const override;
 
-  bool PredicateInstruction(MachineInstr *MI,
+  bool PredicateInstruction(MachineInstr &MI,
                             ArrayRef<MachineOperand> Pred) const override;
 
-  unsigned int getPredicationCost(const MachineInstr *) const override;
+  unsigned int getPredicationCost(const MachineInstr &) const override;
 
   unsigned int getInstrLatency(const InstrItineraryData *ItinData,
                                const MachineInstr *MI,
@@ -214,20 +210,33 @@ namespace llvm {
   void reserveIndirectRegisters(BitVector &Reserved,
                                 const MachineFunction &MF) const;
 
-  unsigned calculateIndirectAddress(unsigned RegIndex,
-                                    unsigned Channel) const override;
+  /// Calculate the "Indirect Address" for the given \p RegIndex and
+  /// \p Channel
+  ///
+  /// We model indirect addressing using a virtual address space that can be
+  /// accesed with loads and stores.  The "Indirect Address" is the memory
+  /// address in this virtual address space that maps to the given \p RegIndex
+  /// and \p Channel.
+  unsigned calculateIndirectAddress(unsigned RegIndex, unsigned Channel) const;
+
 
   const TargetRegisterClass *getIndirectAddrRegClass() const override;
 
+  /// \brief Build instruction(s) for an indirect register write.
+  ///
+  /// \returns The instruction that performs the indirect register write
   MachineInstrBuilder buildIndirectWrite(MachineBasicBlock *MBB,
-                          MachineBasicBlock::iterator I,
-                          unsigned ValueReg, unsigned Address,
-                          unsigned OffsetReg) const override;
+                                         MachineBasicBlock::iterator I,
+                                         unsigned ValueReg, unsigned Address,
+                                         unsigned OffsetReg) const;
 
+  /// \brief Build instruction(s) for an indirect register read.
+  ///
+  /// \returns The instruction that performs the indirect register read
   MachineInstrBuilder buildIndirectRead(MachineBasicBlock *MBB,
                                         MachineBasicBlock::iterator I,
                                         unsigned ValueReg, unsigned Address,
-                                        unsigned OffsetReg) const override;
+                                        unsigned OffsetReg) const;
 
   unsigned getMaxAlusPerClause() const;
 
@@ -257,7 +266,7 @@ namespace llvm {
 
   MachineInstr *buildMovInstr(MachineBasicBlock *MBB,
                               MachineBasicBlock::iterator I,
-                              unsigned DstReg, unsigned SrcReg) const override;
+                              unsigned DstReg, unsigned SrcReg) const;
 
   /// \brief Get the index of Op in the MachineInstr.
   ///
@@ -290,6 +299,11 @@ namespace llvm {
 
   /// \brief Clear the specified flag on the instruction.
   void clearFlag(MachineInstr *MI, unsigned Operand, unsigned Flag) const;
+
+  // Helper functions that check the opcode for status information
+  bool isRegisterStore(const MachineInstr &MI) const;
+  bool isRegisterLoad(const MachineInstr &MI) const;
+
 };
 
 namespace AMDGPU {

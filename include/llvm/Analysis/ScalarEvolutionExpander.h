@@ -80,8 +80,48 @@ namespace llvm {
     /// already in "expanded" form.
     bool LSRMode;
 
-    typedef IRBuilder<true, TargetFolder> BuilderType;
+    typedef IRBuilder<TargetFolder> BuilderType;
     BuilderType Builder;
+
+    // RAII object that stores the current insertion point and restores it when
+    // the object is destroyed. This includes the debug location.  Duplicated
+    // from InsertPointGuard to add SetInsertPoint() which is used to updated
+    // InsertPointGuards stack when insert points are moved during SCEV
+    // expansion.
+    class SCEVInsertPointGuard {
+      IRBuilderBase &Builder;
+      AssertingVH<BasicBlock> Block;
+      BasicBlock::iterator Point;
+      DebugLoc DbgLoc;
+      SCEVExpander *SE;
+
+      SCEVInsertPointGuard(const SCEVInsertPointGuard &) = delete;
+      SCEVInsertPointGuard &operator=(const SCEVInsertPointGuard &) = delete;
+
+    public:
+      SCEVInsertPointGuard(IRBuilderBase &B, SCEVExpander *SE)
+          : Builder(B), Block(B.GetInsertBlock()), Point(B.GetInsertPoint()),
+            DbgLoc(B.getCurrentDebugLocation()), SE(SE) {
+        SE->InsertPointGuards.push_back(this);
+      }
+
+      ~SCEVInsertPointGuard() {
+        // These guards should always created/destroyed in FIFO order since they
+        // are used to guard lexically scoped blocks of code in
+        // ScalarEvolutionExpander.
+        assert(SE->InsertPointGuards.back() == this);
+        SE->InsertPointGuards.pop_back();
+        Builder.restoreIP(IRBuilderBase::InsertPoint(Block, Point));
+        Builder.SetCurrentDebugLocation(DbgLoc);
+      }
+
+      BasicBlock::iterator GetInsertPoint() const { return Point; }
+      void SetInsertPoint(BasicBlock::iterator I) { Point = I; }
+    };
+
+    /// Stack of pointers to saved insert points, used to keep insert points
+    /// consistent when instructions are moved.
+    SmallVector<SCEVInsertPointGuard *, 8> InsertPointGuards;
 
 #ifndef NDEBUG
     const char *DebugType;
@@ -101,6 +141,11 @@ namespace llvm {
 #endif
     }
 
+    ~SCEVExpander() {
+      // Make sure the insert point guard stack is consistent.
+      assert(InsertPointGuards.empty());
+    }
+
 #ifndef NDEBUG
     void setDebugType(const char* s) { DebugType = s; }
 #endif
@@ -117,9 +162,14 @@ namespace llvm {
 
     /// \brief Return true for expressions that may incur non-trivial cost to
     /// evaluate at runtime.
-    bool isHighCostExpansion(const SCEV *Expr, Loop *L) {
+    ///
+    /// At is an optional parameter which specifies point in code where user is
+    /// going to expand this expression. Sometimes this knowledge can lead to a
+    /// more accurate cost estimation.
+    bool isHighCostExpansion(const SCEV *Expr, Loop *L,
+                             const Instruction *At = nullptr) {
       SmallPtrSet<const SCEV *, 8> Processed;
-      return isHighCostExpansionHelper(Expr, L, Processed);
+      return isHighCostExpansionHelper(Expr, L, At, Processed);
     }
 
     /// \brief This method returns the canonical induction variable of the
@@ -145,6 +195,31 @@ namespace llvm {
     /// into the program.  The inserted code is inserted into the specified
     /// block.
     Value *expandCodeFor(const SCEV *SH, Type *Ty, Instruction *I);
+
+    /// \brief Generates a code sequence that evaluates this predicate.
+    /// The inserted instructions will be at position \p Loc.
+    /// The result will be of type i1 and will have a value of 0 when the
+    /// predicate is false and 1 otherwise.
+    Value *expandCodeForPredicate(const SCEVPredicate *Pred, Instruction *Loc);
+
+    /// \brief A specialized variant of expandCodeForPredicate, handling the
+    /// case when we are expanding code for a SCEVEqualPredicate.
+    Value *expandEqualPredicate(const SCEVEqualPredicate *Pred,
+                                Instruction *Loc);
+
+    /// \brief Generates code that evaluates if the \p AR expression will
+    /// overflow.
+    Value *generateOverflowCheck(const SCEVAddRecExpr *AR, Instruction *Loc,
+                                 bool Signed);
+
+    /// \brief A specialized variant of expandCodeForPredicate, handling the
+    /// case when we are expanding code for a SCEVWrapPredicate.
+    Value *expandWrapPredicate(const SCEVWrapPredicate *P, Instruction *Loc);
+
+    /// \brief A specialized variant of expandCodeForPredicate, handling the
+    /// case when we are expanding code for a SCEVUnionPredicate.
+    Value *expandUnionPredicate(const SCEVUnionPredicate *Pred,
+                                Instruction *Loc);
 
     /// \brief Set the current IV increment loop and position.
     void setIVIncInsertPos(const Loop *L, Instruction *Pos) {
@@ -193,11 +268,22 @@ namespace llvm {
 
     void setChainedPhi(PHINode *PN) { ChainedPhis.insert(PN); }
 
+    /// \brief Try to find LLVM IR value for S available at the point At.
+    ///
+    /// L is a hint which tells in which loop to look for the suitable value.
+    /// On success return value which is equivalent to the expanded S at point
+    /// At. Return nullptr if value was not found.
+    ///
+    /// Note that this function does not perform an exhaustive search. I.e if it
+    /// didn't find any value it does not mean that there is no such value.
+    Value *findExistingExpansion(const SCEV *S, const Instruction *At, Loop *L);
+
   private:
     LLVMContext &getContext() const { return SE.getContext(); }
 
     /// \brief Recursive helper function for isHighCostExpansion.
     bool isHighCostExpansionHelper(const SCEV *S, Loop *L,
+                                   const Instruction *At,
                                    SmallPtrSetImpl<const SCEV *> &Processed);
 
     /// \brief Insert the specified binary operator, doing a small amount
@@ -221,6 +307,9 @@ namespace llvm {
     Value *expandAddToGEP(const SCEV *const *op_begin,
                           const SCEV *const *op_end,
                           PointerType *PTy, Type *Ty, Value *V);
+
+    /// \brief Find a previous Value in ExprValueMap for expand.
+    Value *FindValueInExprValueMap(const SCEV *S, const Instruction *InsertPt);
 
     Value *expand(const SCEV *S);
 
@@ -274,6 +363,11 @@ namespace llvm {
                                        bool &InvertStep);
     Value *expandIVInc(PHINode *PN, Value *StepV, const Loop *L,
                        Type *ExpandTy, Type *IntTy, bool useSubtract);
+
+    void hoistBeforePos(DominatorTree *DT, Instruction *InstToHoist,
+                        Instruction *Pos, PHINode *LoopPhi);
+
+    void fixupInsertPoints(Instruction *I);
   };
 }
 

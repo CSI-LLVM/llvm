@@ -20,6 +20,7 @@
 #define LLVM_SUPPORT_TARGETREGISTRY_H
 
 #include "llvm-c/Disassembler.h"
+#include "llvm/ADT/Optional.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/Support/CodeGen.h"
 #include "llvm/Support/FormattedStream.h"
@@ -104,8 +105,8 @@ public:
                                                       StringRef Features);
   typedef TargetMachine *(*TargetMachineCtorTy)(
       const Target &T, const Triple &TT, StringRef CPU, StringRef Features,
-      const TargetOptions &Options, Reloc::Model RM, CodeModel::Model CM,
-      CodeGenOpt::Level OL);
+      const TargetOptions &Options, Optional<Reloc::Model> RM,
+      CodeModel::Model CM, CodeGenOpt::Level OL);
   // If it weren't for layering issues (this header is in llvm/Support, but
   // depends on MC?) this should take the Streamer by value rather than rvalue
   // reference.
@@ -115,7 +116,7 @@ public:
                                               const MCRegisterInfo &MRI,
                                               const Triple &TT, StringRef CPU);
   typedef MCTargetAsmParser *(*MCAsmParserCtorTy)(
-      MCSubtargetInfo &STI, MCAsmParser &P, const MCInstrInfo &MII,
+      const MCSubtargetInfo &STI, MCAsmParser &P, const MCInstrInfo &MII,
       const MCTargetOptions &Options);
   typedef MCDisassembler *(*MCDisassemblerCtorTy)(const Target &T,
                                                   const MCSubtargetInfo &STI,
@@ -141,7 +142,8 @@ public:
   typedef MCStreamer *(*COFFStreamerCtorTy)(MCContext &Ctx, MCAsmBackend &TAB,
                                             raw_pwrite_stream &OS,
                                             MCCodeEmitter *Emitter,
-                                            bool RelaxAll);
+                                            bool RelaxAll,
+                                            bool IncrementalLinkerCompatible);
   typedef MCTargetStreamer *(*NullTargetStreamerCtorTy)(MCStreamer &S);
   typedef MCTargetStreamer *(*AsmTargetStreamerCtorTy)(
       MCStreamer &S, formatted_raw_ostream &OS, MCInstPrinter *InstPrint,
@@ -358,8 +360,7 @@ public:
   /// host if that does not exist.
   TargetMachine *
   createTargetMachine(StringRef TT, StringRef CPU, StringRef Features,
-                      const TargetOptions &Options,
-                      Reloc::Model RM = Reloc::Default,
+                      const TargetOptions &Options, Optional<Reloc::Model> RM,
                       CodeModel::Model CM = CodeModel::Default,
                       CodeGenOpt::Level OL = CodeGenOpt::Default) const {
     if (!TargetMachineCtorFn)
@@ -382,7 +383,7 @@ public:
   ///
   /// \param Parser The target independent parser implementation to use for
   /// parsing and lexing.
-  MCTargetAsmParser *createMCAsmParser(MCSubtargetInfo &STI,
+  MCTargetAsmParser *createMCAsmParser(const MCSubtargetInfo &STI,
                                        MCAsmParser &Parser,
                                        const MCInstrInfo &MII,
                                        const MCTargetOptions &Options) const {
@@ -437,6 +438,7 @@ public:
                                      MCAsmBackend &TAB, raw_pwrite_stream &OS,
                                      MCCodeEmitter *Emitter,
                                      const MCSubtargetInfo &STI, bool RelaxAll,
+                                     bool IncrementalLinkerCompatible,
                                      bool DWARFMustBeAtTheEnd) const {
     MCStreamer *S;
     switch (T.getObjectFormat()) {
@@ -444,7 +446,8 @@ public:
       llvm_unreachable("Unknown object format");
     case Triple::COFF:
       assert(T.isOSWindows() && "only Windows COFF is supported");
-      S = COFFStreamerCtorFn(Ctx, TAB, OS, Emitter, RelaxAll);
+      S = COFFStreamerCtorFn(Ctx, TAB, OS, Emitter, RelaxAll,
+                             IncrementalLinkerCompatible);
       break;
     case Triple::MachO:
       if (MachOStreamerCtorFn)
@@ -1094,7 +1097,8 @@ template <class TargetMachineImpl> struct RegisterTargetMachine {
 private:
   static TargetMachine *Allocator(const Target &T, const Triple &TT,
                                   StringRef CPU, StringRef FS,
-                                  const TargetOptions &Options, Reloc::Model RM,
+                                  const TargetOptions &Options,
+                                  Optional<Reloc::Model> RM,
                                   CodeModel::Model CM, CodeGenOpt::Level OL) {
     return new TargetMachineImpl(T, TT, CPU, FS, Options, RM, CM, OL);
   }
@@ -1133,8 +1137,8 @@ template <class MCAsmParserImpl> struct RegisterMCAsmParser {
   }
 
 private:
-  static MCTargetAsmParser *Allocator(MCSubtargetInfo &STI, MCAsmParser &P,
-                                      const MCInstrInfo &MII,
+  static MCTargetAsmParser *Allocator(const MCSubtargetInfo &STI,
+                                      MCAsmParser &P, const MCInstrInfo &MII,
                                       const MCTargetOptions &Options) {
     return new MCAsmParserImpl(STI, P, MII, Options);
   }

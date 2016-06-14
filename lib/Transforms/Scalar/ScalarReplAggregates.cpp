@@ -60,6 +60,7 @@ STATISTIC(NumAdjusted,  "Number of scalar allocas adjusted to allow promotion");
 STATISTIC(NumConverted, "Number of aggregates converted to scalar");
 
 namespace {
+#define SROA SROA_
   struct SROA : public FunctionPass {
     SROA(int T, bool hasDT, char &ID, int ST, int AT, int SLT)
       : FunctionPass(ID), HasDomTree(hasDT) {
@@ -382,8 +383,8 @@ AllocaInst *ConvertToScalarInfo::TryConvert(AllocaInst *AI) {
     // Create and insert the integer alloca.
     NewTy = IntegerType::get(AI->getContext(), BitWidth);
   }
-  AllocaInst *NewAI = new AllocaInst(NewTy, nullptr, "",
-                                     AI->getParent()->begin());
+  AllocaInst *NewAI =
+      new AllocaInst(NewTy, nullptr, "", &AI->getParent()->front());
   ConvertUsesToScalar(AI, NewAI, 0, nullptr);
   return NewAI;
 }
@@ -509,15 +510,11 @@ bool ConvertToScalarInfo::CanConvertToScalar(Value *V, uint64_t Offset,
 
     if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(UI)) {
       // If this is a GEP with a variable indices, we can't handle it.
-      PointerType* PtrTy = dyn_cast<PointerType>(GEP->getPointerOperandType());
-      if (!PtrTy)
-        return false;
-
       // Compute the offset that this GEP adds to the pointer.
       SmallVector<Value*, 8> Indices(GEP->op_begin()+1, GEP->op_end());
       Value *GEPNonConstantIdx = nullptr;
       if (!GEP->hasAllConstantIndices()) {
-        if (!isa<VectorType>(PtrTy->getElementType()))
+        if (!isa<VectorType>(GEP->getSourceElementType()))
           return false;
         if (NonConstantIdx)
           return false;
@@ -527,8 +524,8 @@ bool ConvertToScalarInfo::CanConvertToScalar(Value *V, uint64_t Offset,
         HadDynamicAccess = true;
       } else
         GEPNonConstantIdx = NonConstantIdx;
-      uint64_t GEPOffset = DL.getIndexedOffset(PtrTy,
-                                               Indices);
+      uint64_t GEPOffset = DL.getIndexedOffsetInType(GEP->getSourceElementType(),
+                                                     Indices);
       // See if all uses can be converted.
       if (!CanConvertToScalar(GEP, Offset+GEPOffset, GEPNonConstantIdx))
         return false;
@@ -622,8 +619,8 @@ void ConvertToScalarInfo::ConvertUsesToScalar(Value *Ptr, AllocaInst *NewAI,
         GEPNonConstantIdx = Indices.pop_back_val();
       } else
         GEPNonConstantIdx = NonConstantIdx;
-      uint64_t GEPOffset = DL.getIndexedOffset(GEP->getPointerOperandType(),
-                                               Indices);
+      uint64_t GEPOffset = DL.getIndexedOffsetInType(GEP->getSourceElementType(),
+                                                     Indices);
       ConvertUsesToScalar(GEP, NewAI, Offset+GEPOffset*8, GEPNonConstantIdx);
       GEP->eraseFromParent();
       continue;
@@ -709,7 +706,7 @@ void ConvertToScalarInfo::ConvertUsesToScalar(Value *Ptr, AllocaInst *NewAI,
         PointerType* SPTy = cast<PointerType>(SrcPtr->getType());
         PointerType* AIPTy = cast<PointerType>(NewAI->getType());
         if (SPTy->getAddressSpace() != AIPTy->getAddressSpace()) {
-          AIPTy = PointerType::get(AIPTy->getElementType(),
+          AIPTy = PointerType::get(NewAI->getAllocatedType(),
                                    SPTy->getAddressSpace());
         }
         SrcPtr = Builder.CreateBitCast(SrcPtr, AIPTy);
@@ -726,7 +723,7 @@ void ConvertToScalarInfo::ConvertUsesToScalar(Value *Ptr, AllocaInst *NewAI,
         PointerType* DPTy = cast<PointerType>(MTI->getDest()->getType());
         PointerType* AIPTy = cast<PointerType>(NewAI->getType());
         if (DPTy->getAddressSpace() != AIPTy->getAddressSpace()) {
-          AIPTy = PointerType::get(AIPTy->getElementType(),
+          AIPTy = PointerType::get(NewAI->getAllocatedType(),
                                    DPTy->getAddressSpace());
         }
         Value *DstPtr = Builder.CreateBitCast(MTI->getDest(), AIPTy);
@@ -1029,7 +1026,7 @@ ConvertScalar_InsertValue(Value *SV, Value *Old,
 
 
 bool SROA::runOnFunction(Function &F) {
-  if (skipOptnoneFunction(F))
+  if (skipFunction(F))
     return false;
 
   bool Changed = performPromotion(F);
@@ -1140,8 +1137,6 @@ public:
 /// the select can be loaded unconditionally.
 static bool isSafeSelectToSpeculate(SelectInst *SI) {
   const DataLayout &DL = SI->getModule()->getDataLayout();
-  bool TDerefable = isDereferenceablePointer(SI->getTrueValue(), DL);
-  bool FDerefable = isDereferenceablePointer(SI->getFalseValue(), DL);
 
   for (User *U : SI->users()) {
     LoadInst *LI = dyn_cast<LoadInst>(U);
@@ -1149,13 +1144,11 @@ static bool isSafeSelectToSpeculate(SelectInst *SI) {
 
     // Both operands to the select need to be dereferencable, either absolutely
     // (e.g. allocas) or at this point because we can see other accesses to it.
-    if (!TDerefable &&
-        !isSafeToLoadUnconditionally(SI->getTrueValue(), LI,
-                                     LI->getAlignment()))
+    if (!isSafeToLoadUnconditionally(SI->getTrueValue(), LI->getAlignment(),
+                                     DL, LI))
       return false;
-    if (!FDerefable &&
-        !isSafeToLoadUnconditionally(SI->getFalseValue(), LI,
-                                     LI->getAlignment()))
+    if (!isSafeToLoadUnconditionally(SI->getFalseValue(), LI->getAlignment(),
+                                     DL, LI))
       return false;
   }
 
@@ -1195,7 +1188,7 @@ static bool isSafePHIToSpeculate(PHINode *PN) {
 
     // Ensure that there are no instructions between the PHI and the load that
     // could store.
-    for (BasicBlock::iterator BBI = PN; &*BBI != LI; ++BBI)
+    for (BasicBlock::iterator BBI(PN); &*BBI != LI; ++BBI)
       if (BBI->mayWriteToMemory())
         return false;
 
@@ -1228,8 +1221,7 @@ static bool isSafePHIToSpeculate(PHINode *PN) {
 
     // If this pointer is always safe to load, or if we can prove that there is
     // already a load in the block, then we can move the load to the pred block.
-    if (isDereferenceablePointer(InVal, DL) ||
-        isSafeToLoadUnconditionally(InVal, Pred->getTerminator(), MaxAlign))
+    if (isSafeToLoadUnconditionally(InVal, MaxAlign, DL, Pred->getTerminator()))
       continue;
 
     return false;
@@ -1365,7 +1357,7 @@ static bool tryToMakeAllocaBePromotable(AllocaInst *AI, const DataLayout &DL) {
       continue;
     }
 
-    Type *LoadTy = cast<PointerType>(PN->getType())->getElementType();
+    Type *LoadTy = AI->getAllocatedType();
     PHINode *NewPN = PHINode::Create(LoadTy, PN->getNumIncomingValues(),
                                      PN->getName()+".ld", PN);
 
@@ -1748,7 +1740,7 @@ void SROA::isSafeGEP(GetElementPtrInst *GEPI,
     Indices.pop_back();
 
   const DataLayout &DL = GEPI->getModule()->getDataLayout();
-  Offset += DL.getIndexedOffset(GEPI->getPointerOperandType(), Indices);
+  Offset += DL.getIndexedOffsetInType(GEPI->getSourceElementType(), Indices);
   if (!TypeHasComponent(Info.AI->getAllocatedType(), Offset, NonConstantIdxSize,
                         DL))
     MarkUnsafe(Info, GEPI);
@@ -2064,7 +2056,7 @@ void SROA::RewriteGEP(GetElementPtrInst *GEPI, AllocaInst *AI, uint64_t Offset,
   Value* NonConstantIdx = nullptr;
   if (!GEPI->hasAllConstantIndices())
     NonConstantIdx = Indices.pop_back_val();
-  Offset += DL.getIndexedOffset(GEPI->getPointerOperandType(), Indices);
+  Offset += DL.getIndexedOffsetInType(GEPI->getSourceElementType(), Indices);
 
   RewriteForScalarRepl(GEPI, AI, Offset, NewElts);
 
@@ -2218,8 +2210,7 @@ SROA::RewriteMemIntrinUserOfAlloca(MemIntrinsic *MI, Instruction *Inst,
 
     // If the pointer is not the right type, insert a bitcast to the right
     // type.
-    Type *NewTy =
-      PointerType::get(AI->getType()->getElementType(), AddrSpace);
+    Type *NewTy = PointerType::get(AI->getAllocatedType(), AddrSpace);
 
     if (OtherPtr->getType() != NewTy)
       OtherPtr = new BitCastInst(OtherPtr, NewTy, OtherPtr->getName(), MI);
@@ -2243,8 +2234,7 @@ SROA::RewriteMemIntrinUserOfAlloca(MemIntrinsic *MI, Instruction *Inst,
                                               OtherPtr->getName()+"."+Twine(i),
                                                    MI);
       uint64_t EltOffset;
-      PointerType *OtherPtrTy = cast<PointerType>(OtherPtr->getType());
-      Type *OtherTy = OtherPtrTy->getElementType();
+      Type *OtherTy = AI->getAllocatedType();
       if (StructType *ST = dyn_cast<StructType>(OtherTy)) {
         EltOffset = DL.getStructLayout(ST)->getElementOffset(i);
       } else {
@@ -2260,8 +2250,8 @@ SROA::RewriteMemIntrinUserOfAlloca(MemIntrinsic *MI, Instruction *Inst,
       OtherEltAlign = (unsigned)MinAlign(OtherEltAlign, EltOffset);
     }
 
-    Value *EltPtr = NewElts[i];
-    Type *EltTy = cast<PointerType>(EltPtr->getType())->getElementType();
+    AllocaInst *EltPtr = NewElts[i];
+    Type *EltTy = EltPtr->getAllocatedType();
 
     // If we got down to a scalar, insert a load or store as appropriate.
     if (EltTy->isSingleValueType()) {
@@ -2493,8 +2483,7 @@ SROA::RewriteLoadUserOfWholeAlloca(LoadInst *LI, AllocaInst *AI,
     // Load the value from the alloca.  If the NewElt is an aggregate, cast
     // the pointer to an integer of the same size before doing the load.
     Value *SrcField = NewElts[i];
-    Type *FieldTy =
-      cast<PointerType>(SrcField->getType())->getElementType();
+    Type *FieldTy = NewElts[i]->getAllocatedType();
     uint64_t FieldSizeBits = DL.getTypeSizeInBits(FieldTy);
 
     // Ignore zero sized fields like {}, they obviously contain no data.

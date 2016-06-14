@@ -142,14 +142,14 @@ bool InlineAsm::ConstraintInfo::Parse(StringRef Str,
       // Find the end of the register name.
       StringRef::iterator ConstraintEnd = std::find(I+1, E, '}');
       if (ConstraintEnd == E) return true;  // "{foo"
-      pCodes->push_back(std::string(I, ConstraintEnd+1));
+      pCodes->push_back(StringRef(I, ConstraintEnd+1 - I));
       I = ConstraintEnd+1;
     } else if (isdigit(static_cast<unsigned char>(*I))) { // Matching Constraint
       // Maximal munch numbers.
       StringRef::iterator NumStart = I;
       while (I != E && isdigit(static_cast<unsigned char>(*I)))
         ++I;
-      pCodes->push_back(std::string(NumStart, I));
+      pCodes->push_back(StringRef(NumStart, I - NumStart));
       unsigned N = atoi(pCodes->back().c_str());
       // Check that this is a valid matching constraint!
       if (N >= ConstraintsSoFar.size() || ConstraintsSoFar[N].Type != isOutput||
@@ -159,6 +159,9 @@ bool InlineAsm::ConstraintInfo::Parse(StringRef Str,
       // If Operand N already has a matching input, reject this.  An output
       // can't be constrained to the same value as multiple inputs.
       if (isMultipleAlternative) {
+        if (multipleAlternativeIndex >=
+            ConstraintsSoFar[N].multipleAlternatives.size())
+          return true;
         InlineAsm::SubConstraintInfo &scInfo =
           ConstraintsSoFar[N].multipleAlternatives[multipleAlternativeIndex];
         if (scInfo.MatchingInput != -1)
@@ -180,11 +183,11 @@ bool InlineAsm::ConstraintInfo::Parse(StringRef Str,
     } else if (*I == '^') {
       // Multi-letter constraint
       // FIXME: For now assuming these are 2-character constraints.
-      pCodes->push_back(std::string(I+1, I+3));
+      pCodes->push_back(StringRef(I+1, 2));
       I += 3;
     } else {
       // Single letter constraint.
-      pCodes->push_back(std::string(I, I+1));
+      pCodes->push_back(StringRef(I, 1));
       ++I;
     }
   }
@@ -290,4 +293,3 @@ bool InlineAsm::Verify(FunctionType *Ty, StringRef ConstStr) {
   if (Ty->getNumParams() != NumInputs) return false;
   return true;
 }
-

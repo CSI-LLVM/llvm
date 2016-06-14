@@ -95,7 +95,7 @@ ExecutionEngine::~ExecutionEngine() {
 namespace {
 /// \brief Helper class which uses a value handler to automatically deletes the
 /// memory block when the GlobalVariable is destroyed.
-class GVMemoryBlock : public CallbackVH {
+class GVMemoryBlock final : public CallbackVH {
   GVMemoryBlock(const GlobalVariable *GV)
     : CallbackVH(const_cast<GlobalVariable*>(GV)) {}
 
@@ -103,12 +103,10 @@ public:
   /// \brief Returns the address the GlobalVariable should be written into.  The
   /// GVMemoryBlock object prefixes that.
   static char *Create(const GlobalVariable *GV, const DataLayout& TD) {
-    Type *ElTy = GV->getType()->getElementType();
+    Type *ElTy = GV->getValueType();
     size_t GVSize = (size_t)TD.getTypeAllocSize(ElTy);
     void *RawMemory = ::operator new(
-      RoundUpToAlignment(sizeof(GVMemoryBlock),
-                         TD.getPreferredAlignment(GV))
-      + GVSize);
+        alignTo(sizeof(GVMemoryBlock), TD.getPreferredAlignment(GV)) + GVSize);
     new(RawMemory) GVMemoryBlock(GV);
     return static_cast<char*>(RawMemory) + sizeof(GVMemoryBlock);
   }
@@ -189,10 +187,17 @@ uint64_t ExecutionEngineState::RemoveMapping(StringRef Name) {
 }
 
 std::string ExecutionEngine::getMangledName(const GlobalValue *GV) {
+  assert(GV->hasName() && "Global must have name.");
+
   MutexGuard locked(lock);
-  Mangler Mang;
   SmallString<128> FullName;
-  Mang.getNameWithPrefix(FullName, GV, false);
+
+  const DataLayout &DL =
+    GV->getParent()->getDataLayout().isDefault()
+      ? getDataLayout()
+      : GV->getParent()->getDataLayout();
+
+  Mangler::getNameWithPrefix(FullName, GV->getName(), DL);
   return FullName.str();
 }
 
@@ -230,11 +235,10 @@ void ExecutionEngine::clearAllGlobalMappings() {
 void ExecutionEngine::clearGlobalMappingsFromModule(Module *M) {
   MutexGuard locked(lock);
 
-  for (Module::iterator FI = M->begin(), FE = M->end(); FI != FE; ++FI)
-    EEState.RemoveMapping(getMangledName(FI));
-  for (Module::global_iterator GI = M->global_begin(), GE = M->global_end();
-       GI != GE; ++GI)
-    EEState.RemoveMapping(getMangledName(GI));
+  for (Function &FI : *M)
+    EEState.RemoveMapping(getMangledName(&FI));
+  for (GlobalVariable &GI : M->globals())
+    EEState.RemoveMapping(getMangledName(&GI));
 }
 
 uint64_t ExecutionEngine::updateGlobalMapping(const GlobalValue *GV,
@@ -470,8 +474,7 @@ EngineBuilder::EngineBuilder() : EngineBuilder(nullptr) {}
 EngineBuilder::EngineBuilder(std::unique_ptr<Module> M)
     : M(std::move(M)), WhichEngine(EngineKind::Either), ErrorStr(nullptr),
       OptLevel(CodeGenOpt::Default), MemMgr(nullptr), Resolver(nullptr),
-      RelocModel(Reloc::Default), CMModel(CodeModel::JITDefault),
-      UseOrcMCJITReplacement(false) {
+      CMModel(CodeModel::JITDefault), UseOrcMCJITReplacement(false) {
 // IR module verification is enabled by default in debug builds, and disabled
 // by default in release builds.
 #ifndef NDEBUG
@@ -623,8 +626,8 @@ GenericValue ExecutionEngine::getConstantValue(const Constant *C) {
       break;
     case Type::VectorTyID:
       // if the whole vector is 'undef' just reserve memory for the value.
-      const VectorType* VTy = dyn_cast<VectorType>(C->getType());
-      const Type *ElemTy = VTy->getElementType();
+      auto* VTy = dyn_cast<VectorType>(C->getType());
+      Type *ElemTy = VTy->getElementType();
       unsigned int elemNum = VTy->getNumElements();
       Result.AggregateVal.resize(elemNum);
       if (ElemTy->isIntegerTy())
@@ -862,8 +865,7 @@ GenericValue ExecutionEngine::getConstantValue(const Constant *C) {
             GV.IntVal = apfLHS.bitcastToAPInt();
             break;
           case Instruction::FRem:
-            apfLHS.mod(APFloat(Sem, RHS.IntVal),
-                       APFloat::rmNearestTiesToEven);
+            apfLHS.mod(APFloat(Sem, RHS.IntVal));
             GV.IntVal = apfLHS.bitcastToAPInt();
             break;
           }
@@ -1145,8 +1147,8 @@ void ExecutionEngine::LoadValueFromMemory(GenericValue &Result,
     break;
   }
   case Type::VectorTyID: {
-    const VectorType *VT = cast<VectorType>(Ty);
-    const Type *ElemT = VT->getElementType();
+    auto *VT = cast<VectorType>(Ty);
+    Type *ElemT = VT->getElementType();
     const unsigned numElems = VT->getNumElements();
     if (ElemT->isFloatTy()) {
       Result.AggregateVal.resize(numElems);
@@ -1350,7 +1352,7 @@ void ExecutionEngine::EmitGlobalVariable(const GlobalVariable *GV) {
   if (!GV->isThreadLocal())
     InitializeMemory(GV->getInitializer(), GA);
 
-  Type *ElTy = GV->getType()->getElementType();
+  Type *ElTy = GV->getValueType();
   size_t GVSize = (size_t)getDataLayout().getTypeAllocSize(ElTy);
   NumInitBytes += (unsigned)GVSize;
   ++NumGlobals;

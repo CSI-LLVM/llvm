@@ -18,7 +18,8 @@
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/SmallVector.h"
 
-#include <stdint.h>
+#include <cstdint>
+#include <cstring>
 #include <limits>
 #include <set>
 #include <vector>
@@ -26,8 +27,11 @@
 namespace llvm {
 
 class DataLayout;
-class GlobalVariable;
+class GlobalObject;
 class Value;
+class raw_ostream;
+
+namespace lowerbitsets {
 
 struct BitSetInfo {
   // The indices of the set bits in the bitset.
@@ -55,8 +59,10 @@ struct BitSetInfo {
   bool containsGlobalOffset(uint64_t Offset) const;
 
   bool containsValue(const DataLayout &DL,
-                     const DenseMap<GlobalVariable *, uint64_t> &GlobalLayout,
+                     const DenseMap<GlobalObject *, uint64_t> &GlobalLayout,
                      Value *V, uint64_t COffset = 0) const;
+
+  void print(raw_ostream &OS) const;
 };
 
 struct BitSetBuilder {
@@ -193,6 +199,7 @@ struct ByteArrayBuilder {
                 uint64_t &AllocByteOffset, uint8_t &AllocMask);
 };
 
-} // namespace llvm
+} // end namespace lowerbitsets
+} // end namespace llvm
 
-#endif
+#endif // LLVM_TRANSFORMS_IPO_LOWERBITSETS_H

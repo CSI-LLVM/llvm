@@ -1,12 +1,11 @@
 add_llvm_library(LLVMAnalysis
   AliasAnalysis.cpp
-  AliasAnalysisCounter.cpp
   AliasAnalysisEvaluator.cpp
-  AliasDebugger.cpp
   AliasSetTracker.cpp
   Analysis.cpp
   AssumptionCache.cpp
   BasicAliasAnalysis.cpp
+  BitSetUtils.cpp
   BlockFrequencyInfo.cpp
   BlockFrequencyInfoImpl.cpp
   BranchProbabilityInfo.cpp
@@ -14,16 +13,23 @@ add_llvm_library(LLVMAnalysis
   CFGPrinter.cpp
   CFLAliasAnalysis.cpp
   CGSCCPassManager.cpp
+  CallGraph.cpp
+  CallGraphSCCPass.cpp
+  CallPrinter.cpp
   CaptureTracking.cpp
   CostModel.cpp
   CodeMetrics.cpp
   ConstantFolding.cpp
   Delinearization.cpp
+  DemandedBits.cpp
   DependenceAnalysis.cpp
   DivergenceAnalysis.cpp
   DomPrinter.cpp
   DominanceFrontier.cpp
+  EHPersonalities.cpp
+  GlobalsModRef.cpp
   IVUsers.cpp
+  InlineCost.cpp
   InstCount.cpp
   InstructionSimplify.cpp
   Interval.cpp
@@ -31,22 +37,27 @@ add_llvm_library(LLVMAnalysis
   IteratedDominanceFrontier.cpp
   LazyCallGraph.cpp
   LazyValueInfo.cpp
-  LibCallAliasAnalysis.cpp
-  LibCallSemantics.cpp
   Lint.cpp
   Loads.cpp
   LoopAccessAnalysis.cpp
+  LoopUnrollAnalyzer.cpp
   LoopInfo.cpp
   LoopPass.cpp
+  LoopPassManager.cpp
   MemDepPrinter.cpp
   MemDerefPrinter.cpp
   MemoryBuiltins.cpp
   MemoryDependenceAnalysis.cpp
   MemoryLocation.cpp
   ModuleDebugInfoPrinter.cpp
-  NoAliasAnalysis.cpp
+  ModuleSummaryAnalysis.cpp
+  ObjCARCAliasAnalysis.cpp
+  ObjCARCAnalysisUtils.cpp
+  ObjCARCInstKind.cpp
+  OrderedBasicBlock.cpp
   PHITransAddr.cpp
   PostDominators.cpp
+  ProfileSummaryInfo.cpp
   PtrUseVisitor.cpp
   RegionInfo.cpp
   RegionPass.cpp
@@ -69,5 +80,3 @@ add_llvm_library(LLVMAnalysis
   )
 
 add_dependencies(LLVMAnalysis intrinsics_gen)
-
-add_subdirectory(IPA)

@@ -12,8 +12,8 @@
 //
 //===----------------------------------------------------------------------===//
 
-#ifndef LLVM_LIB_TARGET_R600_R600REGISTERINFO_H
-#define LLVM_LIB_TARGET_R600_R600REGISTERINFO_H
+#ifndef LLVM_LIB_TARGET_AMDGPU_R600REGISTERINFO_H
+#define LLVM_LIB_TARGET_AMDGPU_R600REGISTERINFO_H
 
 #include "AMDGPURegisterInfo.h"
 
@@ -21,7 +21,7 @@ namespace llvm {
 
 class AMDGPUSubtarget;
 
-struct R600RegisterInfo : public AMDGPURegisterInfo {
+struct R600RegisterInfo final : public AMDGPURegisterInfo {
   RegClassWeight RCW;
 
   R600RegisterInfo();
@@ -35,7 +35,7 @@ struct R600RegisterInfo : public AMDGPURegisterInfo {
 
   /// \brief get the register class of the specified type to use in the
   /// CFGStructurizer
-  const TargetRegisterClass * getCFGStructurizerRegClass(MVT VT) const override;
+  const TargetRegisterClass *getCFGStructurizerRegClass(MVT VT) const;
 
   const RegClassWeight &
     getRegClassWeight(const TargetRegisterClass *RC) const override;

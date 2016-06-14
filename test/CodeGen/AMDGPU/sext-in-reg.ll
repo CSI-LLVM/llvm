@@ -12,8 +12,8 @@ declare i32 @llvm.r600.read.tidig.x() nounwind readnone
 ; SI: buffer_store_dword [[EXTRACT]],
 
 ; EG: MEM_{{.*}} STORE_{{.*}} [[RES:T[0-9]+\.[XYZW]]], [[ADDR:T[0-9]+.[XYZW]]]
-; EG: BFE_INT [[RES]], {{.*}}, 0.0, 1
-; EG-NEXT: LSHR * [[ADDR]]
+; EG: LSHR * [[ADDR]]
+; EG: BFE_INT * [[RES]], {{.*}}, 0.0, 1
 define void @sext_in_reg_i1_i32(i32 addrspace(1)* %out, i32 %in) {
   %shl = shl i32 %in, 31
   %sext = ashr i32 %shl, 31
@@ -458,7 +458,8 @@ define void @vgpr_sext_in_reg_v4i16_to_v4i32(<4 x i32> addrspace(1)* %out, <4 x 
 define void @sext_in_reg_to_illegal_type(i16 addrspace(1)* nocapture %out, i8 addrspace(1)* nocapture %src) nounwind {
   %tmp5 = load i8, i8 addrspace(1)* %src, align 1
   %tmp2 = sext i8 %tmp5 to i32
-  %tmp3 = tail call i32 @llvm.AMDGPU.imax(i32 %tmp2, i32 0) nounwind readnone
+  %tmp2.5 = icmp sgt i32 %tmp2, 0
+  %tmp3 = select i1 %tmp2.5, i32 %tmp2, i32 0
   %tmp4 = trunc i32 %tmp3 to i8
   %tmp6 = sext i8 %tmp4 to i16
   store i16 %tmp6, i16 addrspace(1)* %out, align 2
@@ -607,5 +608,55 @@ define void @sext_in_reg_i2_bfe_offset_1(i32 addrspace(1)* %out, i32 addrspace(1
   %shr = ashr i32 %shl, 30
   %bfe = call i32 @llvm.AMDGPU.bfe.i32(i32 %shr, i32 1, i32 2)
   store i32 %bfe, i32 addrspace(1)* %out, align 4
+  ret void
+}
+
+; Make sure we propagate the VALUness to users of a moved scalar BFE.
+
+; FUNC-LABEL: {{^}}v_sext_in_reg_i1_to_i64_move_use:
+; SI: buffer_load_dwordx2
+; SI: v_lshl_b64 v{{\[}}[[VAL_LO:[0-9]+]]:[[VAL_HI:[0-9]+]]{{\]}}
+; SI-DAG: v_bfe_i32 v[[LO:[0-9]+]], v[[VAL_LO]], 0, 1
+; SI-DAG: v_ashrrev_i32_e32 v[[HI:[0-9]+]], 31, v[[LO]]
+; SI-DAG: v_and_b32_e32 v[[RESULT_LO:[0-9]+]], s{{[0-9]+}}, v[[LO]]
+; SI-DAG: v_and_b32_e32 v[[RESULT_HI:[0-9]+]], s{{[0-9]+}}, v[[HI]]
+; SI: buffer_store_dwordx2 v{{\[}}[[RESULT_LO]]:[[RESULT_HI]]{{\]}}
+define void @v_sext_in_reg_i1_to_i64_move_use(i64 addrspace(1)* %out, i64 addrspace(1)* %aptr, i64 addrspace(1)* %bptr, i64 %s.val) nounwind {
+  %tid = call i32 @llvm.r600.read.tidig.x()
+  %a.gep = getelementptr i64, i64 addrspace(1)* %aptr, i32 %tid
+  %b.gep = getelementptr i64, i64 addrspace(1)* %aptr, i32 %tid
+  %out.gep = getelementptr i64, i64 addrspace(1)* %out, i32 %tid
+  %a = load i64, i64 addrspace(1)* %a.gep, align 8
+  %b = load i64, i64 addrspace(1)* %b.gep, align 8
+
+  %c = shl i64 %a, %b
+  %shl = shl i64 %c, 63
+  %ashr = ashr i64 %shl, 63
+
+  %and = and i64 %ashr, %s.val
+  store i64 %and, i64 addrspace(1)* %out.gep, align 8
+  ret void
+}
+
+; FUNC-LABEL: {{^}}v_sext_in_reg_i32_to_i64_move_use:
+; SI: buffer_load_dwordx2
+; SI: v_lshl_b64 v{{\[}}[[LO:[0-9]+]]:[[HI:[0-9]+]]{{\]}},
+; SI-DAG: v_ashrrev_i32_e32 v[[SHR:[0-9]+]], 31, v[[LO]]
+; SI-DAG: v_and_b32_e32 v[[RESULT_LO:[0-9]+]], s{{[0-9]+}}, v[[LO]]
+; SI-DAG: v_and_b32_e32 v[[RESULT_HI:[0-9]+]], s{{[0-9]+}}, v[[SHR]]
+; SI: buffer_store_dwordx2 v{{\[}}[[RESULT_LO]]:[[RESULT_HI]]{{\]}}
+define void @v_sext_in_reg_i32_to_i64_move_use(i64 addrspace(1)* %out, i64 addrspace(1)* %aptr, i64 addrspace(1)* %bptr, i64 %s.val) nounwind {
+  %tid = call i32 @llvm.r600.read.tidig.x()
+  %a.gep = getelementptr i64, i64 addrspace(1)* %aptr, i32 %tid
+  %b.gep = getelementptr i64, i64 addrspace(1)* %aptr, i32 %tid
+  %out.gep = getelementptr i64, i64 addrspace(1)* %out, i32 %tid
+  %a = load i64, i64 addrspace(1)* %a.gep, align 8
+  %b = load i64, i64 addrspace(1)* %b.gep, align 8
+
+  %c = shl i64 %a, %b
+  %shl = shl i64 %c, 32
+  %ashr = ashr i64 %shl, 32
+  %and = and i64 %ashr, %s.val
+  store i64 %and, i64 addrspace(1)* %out.gep, align 8
   ret void
 }

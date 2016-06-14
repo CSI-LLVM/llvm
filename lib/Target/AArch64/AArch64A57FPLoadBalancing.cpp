@@ -43,7 +43,6 @@
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/raw_ostream.h"
-#include <list>
 using namespace llvm;
 
 #define DEBUG_TYPE "aarch64-a57-fp-load-balancing"
@@ -125,6 +124,11 @@ public:
 
   bool runOnMachineFunction(MachineFunction &F) override;
 
+  MachineFunctionProperties getRequiredProperties() const override {
+    return MachineFunctionProperties().set(
+        MachineFunctionProperties::Property::AllVRegsAllocated);
+  }
+
   const char *getPassName() const override {
     return "A57 FP Anti-dependency breaker";
   }
@@ -158,7 +162,7 @@ INITIALIZE_PASS_END(AArch64A57FPLoadBalancing, DEBUG_TYPE,
                     "AArch64 A57 FP Load-Balancing", false, false)
 
 namespace {
-/// A Chain is a sequence of instructions that are linked together by 
+/// A Chain is a sequence of instructions that are linked together by
 /// an accumulation operand. For example:
 ///
 ///   fmul d0<def>, ?
@@ -285,7 +289,7 @@ public:
   std::string str() const {
     std::string S;
     raw_string_ostream OS(S);
-    
+
     OS << "{";
     StartInst->print(OS, /* SkipOpers= */true);
     OS << " -> ";
@@ -307,9 +311,10 @@ public:
 //===----------------------------------------------------------------------===//
 
 bool AArch64A57FPLoadBalancing::runOnMachineFunction(MachineFunction &F) {
-  // Don't do anything if this isn't an A53 or A57.
-  if (!(F.getSubtarget<AArch64Subtarget>().isCortexA53() ||
-        F.getSubtarget<AArch64Subtarget>().isCortexA57()))
+  if (skipFunction(*F.getFunction()))
+    return false;
+
+  if (!F.getSubtarget<AArch64Subtarget>().balanceFPOps())
     return false;
 
   bool Changed = false;
@@ -427,7 +432,7 @@ Chain *AArch64A57FPLoadBalancing::getAndEraseNext(Color PreferredColor,
       return Ch;
     }
   }
-  
+
   // Bailout case - just return the first item.
   Chain *Ch = L.front();
   L.erase(L.begin());
@@ -492,10 +497,10 @@ bool AArch64A57FPLoadBalancing::colorChainSet(std::vector<Chain*> GV,
 int AArch64A57FPLoadBalancing::scavengeRegister(Chain *G, Color C,
                                                 MachineBasicBlock &MBB) {
   RegScavenger RS;
-  RS.enterBasicBlock(&MBB);
+  RS.enterBasicBlock(MBB);
   RS.forward(MachineBasicBlock::iterator(G->getStart()));
 
-  // Can we find an appropriate register that is available throughout the life 
+  // Can we find an appropriate register that is available throughout the life
   // of the chain?
   unsigned RegClassID = G->getStart()->getDesc().OpInfo[0].RegClass;
   BitVector AvailableRegs = RS.getRegsAvailable(TRI->getRegClass(RegClassID));
@@ -530,8 +535,7 @@ int AArch64A57FPLoadBalancing::scavengeRegister(Chain *G, Color C,
   for (auto Reg : Ord) {
     if (!AvailableRegs[Reg])
       continue;
-    if ((C == Color::Even && (Reg % 2) == 0) ||
-        (C == Color::Odd && (Reg % 2) == 1))
+    if (C == getColor(Reg))
       return Reg;
   }
 

@@ -63,19 +63,6 @@ enum PPC970_Unit {
 };
 } // end namespace PPCII
 
-namespace MachineCombinerPattern {
-enum MC_PATTERN : int {
-  // These are commutative variants for reassociating a computation chain
-  // of the form:
-  //   B = A op X (Prev)
-  //   C = B op Y (Root)
-  MC_REASSOC_AX_BY = 0,
-  MC_REASSOC_AX_YB = 1,
-  MC_REASSOC_XA_BY = 2,
-  MC_REASSOC_XA_YB = 3,
-};
-} // end namespace MachineCombinerPattern
-
 class PPCSubtarget;
 class PPCInstrInfo : public PPCGenInstrInfo {
   PPCSubtarget &Subtarget;
@@ -86,12 +73,29 @@ class PPCInstrInfo : public PPCGenInstrInfo {
                            const TargetRegisterClass *RC,
                            SmallVectorImpl<MachineInstr*> &NewMIs,
                            bool &NonRI, bool &SpillsVRS) const;
-  bool LoadRegFromStackSlot(MachineFunction &MF, DebugLoc DL,
+  bool LoadRegFromStackSlot(MachineFunction &MF, const DebugLoc &DL,
                             unsigned DestReg, int FrameIdx,
                             const TargetRegisterClass *RC,
-                            SmallVectorImpl<MachineInstr*> &NewMIs,
+                            SmallVectorImpl<MachineInstr *> &NewMIs,
                             bool &NonRI, bool &SpillsVRS) const;
   virtual void anchor();
+
+protected:
+  /// Commutes the operands in the given instruction.
+  /// The commutable operands are specified by their indices OpIdx1 and OpIdx2.
+  ///
+  /// Do not call this method for a non-commutable instruction or for
+  /// non-commutable pair of operand indices OpIdx1 and OpIdx2.
+  /// Even though the instruction is commutable, the method may still
+  /// fail to commute the operands, null pointer is returned in such cases.
+  ///
+  /// For example, we can commute rlwimi instructions, but only if the
+  /// rotate amt is zero.  We also have to munge the immediates a bit.
+  MachineInstr *commuteInstructionImpl(MachineInstr *MI,
+                                       bool NewMI,
+                                       unsigned OpIdx1,
+                                       unsigned OpIdx2) const override;
+
 public:
   explicit PPCInstrInfo(PPCSubtarget &STI);
 
@@ -135,21 +139,15 @@ public:
   bool useMachineCombiner() const override {
     return true;
   }
-  
+
   /// Return true when there is potentially a faster code sequence
   /// for an instruction chain ending in <Root>. All potential patterns are
   /// output in the <Pattern> array.
   bool getMachineCombinerPatterns(
       MachineInstr &Root,
-      SmallVectorImpl<MachineCombinerPattern::MC_PATTERN> &P) const override;
-  
-  /// When getMachineCombinerPatterns() finds a pattern, this function generates
-  /// the instructions that could replace the original code sequence.
-  void genAlternativeCodeSequence(
-          MachineInstr &Root, MachineCombinerPattern::MC_PATTERN P,
-          SmallVectorImpl<MachineInstr *> &InsInstrs,
-          SmallVectorImpl<MachineInstr *> &DelInstrs,
-          DenseMap<unsigned, unsigned> &InstrIdxForVirtReg) const override;
+      SmallVectorImpl<MachineCombinerPattern> &P) const override;
+
+  bool isAssociativeAndCommutative(const MachineInstr &Inst) const override;
 
   bool isCoalescableExtInstr(const MachineInstr &MI,
                              unsigned &SrcReg, unsigned &DstReg,
@@ -158,10 +156,6 @@ public:
                                int &FrameIndex) const override;
   unsigned isStoreToStackSlot(const MachineInstr *MI,
                               int &FrameIndex) const override;
-
-  // commuteInstruction - We can commute rlwimi instructions, but only if the
-  // rotate amt is zero.  We also have to munge the immediates a bit.
-  MachineInstr *commuteInstruction(MachineInstr *MI, bool NewMI) const override;
 
   bool findCommutedOpIndices(MachineInstr *MI, unsigned &SrcOpIdx1,
                              unsigned &SrcOpIdx2) const override;
@@ -178,18 +172,18 @@ public:
   unsigned RemoveBranch(MachineBasicBlock &MBB) const override;
   unsigned InsertBranch(MachineBasicBlock &MBB, MachineBasicBlock *TBB,
                         MachineBasicBlock *FBB, ArrayRef<MachineOperand> Cond,
-                        DebugLoc DL) const override;
+                        const DebugLoc &DL) const override;
 
   // Select analysis.
   bool canInsertSelect(const MachineBasicBlock &, ArrayRef<MachineOperand> Cond,
                        unsigned, unsigned, int &, int &, int &) const override;
   void insertSelect(MachineBasicBlock &MBB, MachineBasicBlock::iterator MI,
-                    DebugLoc DL, unsigned DstReg, ArrayRef<MachineOperand> Cond,
-                    unsigned TrueReg, unsigned FalseReg) const override;
+                    const DebugLoc &DL, unsigned DstReg,
+                    ArrayRef<MachineOperand> Cond, unsigned TrueReg,
+                    unsigned FalseReg) const override;
 
-  void copyPhysReg(MachineBasicBlock &MBB,
-                   MachineBasicBlock::iterator I, DebugLoc DL,
-                   unsigned DestReg, unsigned SrcReg,
+  void copyPhysReg(MachineBasicBlock &MBB, MachineBasicBlock::iterator I,
+                   const DebugLoc &DL, unsigned DestReg, unsigned SrcReg,
                    bool KillSrc) const override;
 
   void storeRegToStackSlot(MachineBasicBlock &MBB,
@@ -215,7 +209,7 @@ public:
   // profitable to use the predicated branches.
   bool isProfitableToIfCvt(MachineBasicBlock &MBB,
                           unsigned NumCycles, unsigned ExtraPredCycles,
-                          const BranchProbability &Probability) const override {
+                          BranchProbability Probability) const override {
     return true;
   }
 
@@ -223,12 +217,10 @@ public:
                            unsigned NumT, unsigned ExtraT,
                            MachineBasicBlock &FMBB,
                            unsigned NumF, unsigned ExtraF,
-                           const BranchProbability &Probability) const override;
+                           BranchProbability Probability) const override;
 
-  bool isProfitableToDupForIfCvt(MachineBasicBlock &MBB,
-                                 unsigned NumCycles,
-                                 const BranchProbability
-                                 &Probability) const override {
+  bool isProfitableToDupForIfCvt(MachineBasicBlock &MBB, unsigned NumCycles,
+                                 BranchProbability Probability) const override {
     return true;
   }
 
@@ -238,20 +230,20 @@ public:
   }
 
   // Predication support.
-  bool isPredicated(const MachineInstr *MI) const override;
+  bool isPredicated(const MachineInstr &MI) const override;
 
-  bool isUnpredicatedTerminator(const MachineInstr *MI) const override;
+  bool isUnpredicatedTerminator(const MachineInstr &MI) const override;
 
-  bool PredicateInstruction(MachineInstr *MI,
+  bool PredicateInstruction(MachineInstr &MI,
                             ArrayRef<MachineOperand> Pred) const override;
 
   bool SubsumesPredicate(ArrayRef<MachineOperand> Pred1,
                          ArrayRef<MachineOperand> Pred2) const override;
 
-  bool DefinesPredicate(MachineInstr *MI,
+  bool DefinesPredicate(MachineInstr &MI,
                         std::vector<MachineOperand> &Pred) const override;
 
-  bool isPredicable(MachineInstr *MI) const override;
+  bool isPredicable(MachineInstr &MI) const override;
 
   // Comparison optimization.
 
@@ -271,6 +263,18 @@ public:
   unsigned GetInstSizeInBytes(const MachineInstr *MI) const;
 
   void getNoopForMachoTarget(MCInst &NopInst) const override;
+
+  std::pair<unsigned, unsigned>
+  decomposeMachineOperandsTargetFlags(unsigned TF) const override;
+
+  ArrayRef<std::pair<unsigned, const char *>>
+  getSerializableDirectMachineOperandTargetFlags() const override;
+
+  ArrayRef<std::pair<unsigned, const char *>>
+  getSerializableBitmaskMachineOperandTargetFlags() const override;
+
+  // Lower pseudo instructions after register allocation.
+  bool expandPostRAPseudo(MachineBasicBlock::iterator MI) const override;
 };
 
 }

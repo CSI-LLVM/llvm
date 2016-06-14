@@ -13,9 +13,11 @@
 //===----------------------------------------------------------------------===//
 
 #include "AMDGPUSubtarget.h"
+#include "AMDGPUCallLowering.h"
 #include "R600ISelLowering.h"
 #include "R600InstrInfo.h"
 #include "R600MachineScheduler.h"
+#include "SIFrameLowering.h"
 #include "SIISelLowering.h"
 #include "SIInstrInfo.h"
 #include "SIMachineFunctionInfo.h"
@@ -31,6 +33,17 @@ using namespace llvm;
 #define GET_SUBTARGETINFO_CTOR
 #include "AMDGPUGenSubtargetInfo.inc"
 
+#ifdef LLVM_BUILD_GLOBAL_ISEL
+namespace {
+struct AMDGPUGISelActualAccessor : public GISelAccessor {
+  std::unique_ptr<CallLowering> CallLoweringInfo;
+  const CallLowering *getCallLowering() const override {
+    return CallLoweringInfo.get();
+  }
+};
+} // End anonymous namespace.
+#endif
+
 AMDGPUSubtarget &
 AMDGPUSubtarget::initializeSubtargetDependencies(const Triple &TT,
                                                  StringRef GPU, StringRef FS) {
@@ -43,11 +56,10 @@ AMDGPUSubtarget::initializeSubtargetDependencies(const Triple &TT,
   // for SI has the unhelpful behavior that it unsets everything else if you
   // disable it.
 
-  SmallString<256> FullFS("+promote-alloca,+fp64-denormals,");
+  SmallString<256> FullFS("+promote-alloca,+fp64-denormals,+load-store-opt,");
+  if (isAmdHsaOS()) // Turn on FlatForGlobal for HSA.
+    FullFS += "+flat-for-global,";
   FullFS += FS;
-
-  if (GPU == "" && TT.getArch() == Triple::amdgcn)
-    GPU = "SI";
 
   ParseSubtargetFeatures(GPU, FullFS);
 
@@ -58,36 +70,76 @@ AMDGPUSubtarget::initializeSubtargetDependencies(const Triple &TT,
     FP32Denormals = false;
     FP64Denormals = false;
   }
+
+  // Set defaults if needed.
+  if (MaxPrivateElementSize == 0)
+    MaxPrivateElementSize = 4;
+
   return *this;
 }
 
 AMDGPUSubtarget::AMDGPUSubtarget(const Triple &TT, StringRef GPU, StringRef FS,
                                  TargetMachine &TM)
-    : AMDGPUGenSubtargetInfo(TT, GPU, FS), DevName(GPU), Is64bit(false),
+    : AMDGPUGenSubtargetInfo(TT, GPU, FS),
       DumpCode(false), R600ALUInst(false), HasVertexCache(false),
-      TexVTXClauseSize(0), Gen(AMDGPUSubtarget::R600), FP64(false),
-      FP64Denormals(false), FP32Denormals(false), FastFMAF32(false),
-      CaymanISA(false), FlatAddressSpace(false), EnableIRStructurizer(true),
-      EnablePromoteAlloca(false), EnableIfCvt(true), EnableLoadStoreOpt(false),
+      TexVTXClauseSize(0),
+      Gen(TT.getArch() == Triple::amdgcn ? SOUTHERN_ISLANDS : R600),
+      FP64(false),
+      FP64Denormals(false), FP32Denormals(false), FPExceptions(false),
+      FastFMAF32(false), HalfRate64Ops(false), CaymanISA(false),
+      FlatAddressSpace(false), FlatForGlobal(false), EnableIRStructurizer(true),
+      EnablePromoteAlloca(false),
+      EnableIfCvt(true), EnableLoadStoreOpt(false),
       EnableUnsafeDSOffsetFolding(false),
-      WavefrontSize(0), CFALUBug(false), LocalMemorySize(0),
+      EnableXNACK(false),
+      WavefrontSize(64), CFALUBug(false),
+      LocalMemorySize(0), MaxPrivateElementSize(0),
       EnableVGPRSpilling(false), SGPRInitBug(false), IsGCN(false),
-      GCN1Encoding(false), GCN3Encoding(false), CIInsts(false), LDSBankCount(0),
-      IsaVersion(ISAVersion0_0_0), EnableHugeScratchBuffer(false),
-      FrameLowering(TargetFrameLowering::StackGrowsUp,
-                    64 * 16, // Maximum stack alignment (long16)
-                    0),
+      GCN1Encoding(false), GCN3Encoding(false), CIInsts(false),
+      HasSMemRealTime(false), Has16BitInsts(false),
+      LDSBankCount(0),
+      IsaVersion(ISAVersion0_0_0),
+      EnableSIScheduler(false),
+      DebuggerInsertNops(false), DebuggerReserveRegs(false),
+      FrameLowering(nullptr),
+      GISel(),
       InstrItins(getInstrItineraryForCPU(GPU)), TargetTriple(TT) {
 
   initializeSubtargetDependencies(TT, GPU, FS);
 
+  const unsigned MaxStackAlign = 64 * 16; // Maximum stack alignment (long16)
+
   if (getGeneration() <= AMDGPUSubtarget::NORTHERN_ISLANDS) {
     InstrInfo.reset(new R600InstrInfo(*this));
     TLInfo.reset(new R600TargetLowering(TM, *this));
+
+    // FIXME: Should have R600 specific FrameLowering
+    FrameLowering.reset(new AMDGPUFrameLowering(
+                          TargetFrameLowering::StackGrowsUp,
+                          MaxStackAlign,
+                          0));
   } else {
     InstrInfo.reset(new SIInstrInfo(*this));
     TLInfo.reset(new SITargetLowering(TM, *this));
+    FrameLowering.reset(new SIFrameLowering(
+                          TargetFrameLowering::StackGrowsUp,
+                          MaxStackAlign,
+                          0));
+#ifndef LLVM_BUILD_GLOBAL_ISEL
+    GISelAccessor *GISel = new GISelAccessor();
+#else
+    AMDGPUGISelActualAccessor *GISel =
+        new AMDGPUGISelActualAccessor();
+    GISel->CallLoweringInfo.reset(
+        new AMDGPUCallLowering(*getTargetLowering()));
+#endif
+    setGISelAccessor(*GISel);
   }
+}
+
+const CallLowering *AMDGPUSubtarget::getCallLowering() const {
+  assert(GISel && "Access to GlobalISel APIs not set");
+  return GISel->getCallLowering();
 }
 
 unsigned AMDGPUSubtarget::getStackEntrySize() const {
@@ -104,6 +156,64 @@ unsigned AMDGPUSubtarget::getStackEntrySize() const {
   }
 }
 
+// FIXME: These limits are for SI. Did they change with the larger maximum LDS
+// size?
+unsigned AMDGPUSubtarget::getMaxLocalMemSizeWithWaveCount(unsigned NWaves) const {
+  switch (NWaves) {
+  case 10:
+    return 1638;
+  case 9:
+    return 1820;
+  case 8:
+    return 2048;
+  case 7:
+    return 2340;
+  case 6:
+    return 2730;
+  case 5:
+    return 3276;
+  case 4:
+    return 4096;
+  case 3:
+    return 5461;
+  case 2:
+    return 8192;
+  default:
+    return getLocalMemorySize();
+  }
+}
+
+unsigned AMDGPUSubtarget::getOccupancyWithLocalMemSize(uint32_t Bytes) const {
+  if (Bytes <= 1638)
+    return 10;
+
+  if (Bytes <= 1820)
+    return 9;
+
+  if (Bytes <= 2048)
+    return 8;
+
+  if (Bytes <= 2340)
+    return 7;
+
+  if (Bytes <= 2730)
+    return 6;
+
+  if (Bytes <= 3276)
+    return 5;
+
+  if (Bytes <= 4096)
+    return 4;
+
+  if (Bytes <= 5461)
+    return 3;
+
+  if (Bytes <= 8192)
+    return 2;
+
+  return 1;
+}
+
 unsigned AMDGPUSubtarget::getAmdKernelCodeChipID() const {
   switch(getGeneration()) {
   default: llvm_unreachable("ChipID unknown");
@@ -115,9 +225,8 @@ AMDGPU::IsaVersion AMDGPUSubtarget::getIsaVersion() const {
   return AMDGPU::getIsaVersion(getFeatureBits());
 }
 
-bool AMDGPUSubtarget::isVGPRSpillingEnabled(
-                                       const SIMachineFunctionInfo *MFI) const {
-  return MFI->getShaderType() == ShaderType::COMPUTE || EnableVGPRSpilling;
+bool AMDGPUSubtarget::isVGPRSpillingEnabled(const Function& F) const {
+  return !AMDGPU::isShader(F.getCallingConv()) || EnableVGPRSpilling;
 }
 
 void AMDGPUSubtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
@@ -135,6 +244,10 @@ void AMDGPUSubtarget::overrideSchedPolicy(MachineSchedPolicy &Policy,
     // register spills than just using one of these approaches on its own.
     Policy.OnlyTopDown = false;
     Policy.OnlyBottomUp = false;
+
+    // Enabling ShouldTrackLaneMasks crashes the SI Machine Scheduler.
+    if (!enableSIScheduler())
+      Policy.ShouldTrackLaneMasks = true;
   }
 }
 

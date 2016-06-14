@@ -34,20 +34,20 @@
 
 using namespace llvm;
 
-NewArchiveIterator::NewArchiveIterator(object::Archive::child_iterator I,
+NewArchiveIterator::NewArchiveIterator(const object::Archive::Child &OldMember,
                                        StringRef Name)
-    : IsNewMember(false), Name(Name), OldI(I) {}
+    : IsNewMember(false), Name(Name), OldMember(OldMember) {}
 
 NewArchiveIterator::NewArchiveIterator(StringRef FileName)
-    : IsNewMember(true), Name(FileName) {}
+    : IsNewMember(true), Name(FileName), OldMember(nullptr, nullptr, nullptr) {}
 
 StringRef NewArchiveIterator::getName() const { return Name; }
 
 bool NewArchiveIterator::isNewMember() const { return IsNewMember; }
 
-object::Archive::child_iterator NewArchiveIterator::getOld() const {
+const object::Archive::Child &NewArchiveIterator::getOld() const {
   assert(!IsNewMember);
-  return OldI;
+  return OldMember;
 }
 
 StringRef NewArchiveIterator::getNew() const {
@@ -77,7 +77,7 @@ NewArchiveIterator::getFD(sys::fs::file_status &NewStatus) const {
 
 template <typename T>
 static void printWithSpacePadding(raw_fd_ostream &OS, T Data, unsigned Size,
-				  bool MayTruncate = false) {
+                                  bool MayTruncate = false) {
   uint64_t OldPos = OS.tell();
   OS << Data;
   unsigned SizeSoFar = OS.tell() - OldPos;
@@ -231,11 +231,14 @@ writeSymbolTable(raw_fd_ostream &Out, object::Archive::Kind Kind,
   LLVMContext Context;
   for (unsigned MemberNum = 0, N = Members.size(); MemberNum < N; ++MemberNum) {
     MemoryBufferRef MemberBuffer = Buffers[MemberNum];
-    ErrorOr<std::unique_ptr<object::SymbolicFile>> ObjOrErr =
+    Expected<std::unique_ptr<object::SymbolicFile>> ObjOrErr =
         object::SymbolicFile::createSymbolicFile(
             MemberBuffer, sys::fs::file_magic::unknown, &Context);
-    if (!ObjOrErr)
-      continue;  // FIXME: check only for "not an object file" errors.
+    if (!ObjOrErr) {
+      // FIXME: check only for "not an object file" errors.
+      consumeError(ObjOrErr.takeError());
+      continue;
+    }
     object::SymbolicFile &Obj = *ObjOrErr.get();
 
     if (!HeaderStartOffset) {
@@ -304,7 +307,10 @@ std::pair<StringRef, std::error_code>
 llvm::writeArchive(StringRef ArcName,
                    std::vector<NewArchiveIterator> &NewMembers,
                    bool WriteSymtab, object::Archive::Kind Kind,
-                   bool Deterministic, bool Thin) {
+                   bool Deterministic, bool Thin,
+                   std::unique_ptr<MemoryBuffer> OldArchiveBuf) {
+  assert((!Thin || Kind == object::Archive::K_GNU) &&
+         "Only the gnu format has a thin mode");
   SmallString<128> TmpArchive;
   int TmpArchiveFD;
   if (auto EC = sys::fs::createUniqueFile(ArcName + ".temp-archive-%%%%%%%.a",
@@ -324,8 +330,7 @@ llvm::writeArchive(StringRef ArcName,
   std::vector<MemoryBufferRef> Members;
   std::vector<sys::fs::file_status> NewMemberStatus;
 
-  for (unsigned I = 0, N = NewMembers.size(); I < N; ++I) {
-    NewArchiveIterator &Member = NewMembers[I];
+  for (NewArchiveIterator &Member : NewMembers) {
     MemoryBufferRef MemberRef;
 
     if (Member.isNewMember()) {
@@ -346,11 +351,11 @@ llvm::writeArchive(StringRef ArcName,
       Buffers.push_back(std::move(MemberBufferOrErr.get()));
       MemberRef = Buffers.back()->getMemBufferRef();
     } else {
-      object::Archive::child_iterator OldMember = Member.getOld();
-      assert((!Thin || OldMember->getParent()->isThin()) &&
+      const object::Archive::Child &OldMember = Member.getOld();
+      assert((!Thin || OldMember.getParent()->isThin()) &&
              "Thin archives cannot refers to member of other archives");
       ErrorOr<MemoryBufferRef> MemberBufferOrErr =
-          OldMember->getMemoryBufferRef();
+          OldMember.getMemoryBufferRef();
       if (auto EC = MemberBufferOrErr.getError())
         return std::make_pair("", EC);
       MemberRef = MemberBufferOrErr.get();
@@ -397,11 +402,11 @@ llvm::writeArchive(StringRef ArcName,
       GID = Status.getGroup();
       Perms = Status.permissions();
     } else {
-      object::Archive::child_iterator OldMember = I.getOld();
-      ModTime = OldMember->getLastModified();
-      UID = OldMember->getUID();
-      GID = OldMember->getGID();
-      Perms = OldMember->getAccessMode();
+      const object::Archive::Child &OldMember = I.getOld();
+      ModTime = OldMember.getLastModified();
+      UID = OldMember.getUID();
+      GID = OldMember.getGID();
+      Perms = OldMember.getAccessMode();
     }
 
     if (I.isNewMember()) {
@@ -411,9 +416,14 @@ llvm::writeArchive(StringRef ArcName,
                         StringMapIndexIter, ModTime, UID, GID, Perms,
                         Status.getSize());
     } else {
-      object::Archive::child_iterator OldMember = I.getOld();
-      printMemberHeader(Out, Kind, Thin, I.getName(), StringMapIndexIter,
-                        ModTime, UID, GID, Perms, OldMember->getSize());
+      const object::Archive::Child &OldMember = I.getOld();
+      ErrorOr<uint32_t> Size = OldMember.getSize();
+      if (std::error_code EC = Size.getError())
+        return std::make_pair("", EC);
+      StringRef FileName = I.getName();
+      printMemberHeader(Out, Kind, Thin, sys::path::filename(FileName),
+                        StringMapIndexIter, ModTime, UID, GID, Perms,
+                        Size.get());
     }
 
     if (!Thin)
@@ -434,6 +444,19 @@ llvm::writeArchive(StringRef ArcName,
 
   Output.keep();
   Out.close();
+
+  // At this point, we no longer need whatever backing memory
+  // was used to generate the NewMembers. On Windows, this buffer
+  // could be a mapped view of the file we want to replace (if
+  // we're updating an existing archive, say). In that case, the
+  // rename would still succeed, but it would leave behind a
+  // temporary file (actually the original file renamed) because
+  // a file cannot be deleted while there's a handle open on it,
+  // only renamed. So by freeing this buffer, this ensures that
+  // the last open handle on the destination file, if any, is
+  // closed before we attempt to rename.
+  OldArchiveBuf.reset();
+
   sys::fs::rename(TmpArchive, ArcName);
   return std::make_pair("", std::error_code());
 }

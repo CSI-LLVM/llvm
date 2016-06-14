@@ -90,7 +90,7 @@ bool DeadMachineInstructionElim::isDead(const MachineInstr *MI) const {
 }
 
 bool DeadMachineInstructionElim::runOnMachineFunction(MachineFunction &MF) {
-  if (skipOptnoneFunction(*MF.getFunction()))
+  if (skipFunction(*MF.getFunction()))
     return false;
 
   bool AnyChanges = false;
@@ -110,9 +110,8 @@ bool DeadMachineInstructionElim::runOnMachineFunction(MachineFunction &MF) {
     // block.
     for (MachineBasicBlock::succ_iterator S = MBB.succ_begin(),
            E = MBB.succ_end(); S != E; S++)
-      for (MachineBasicBlock::livein_iterator LI = (*S)->livein_begin();
-           LI != (*S)->livein_end(); LI++)
-        LivePhysRegs.set(*LI);
+      for (const auto &LI : (*S)->liveins())
+        LivePhysRegs.set(LI.PhysReg);
 
     // Now scan the instructions and delete dead ones, tracking physreg
     // liveness as we go.

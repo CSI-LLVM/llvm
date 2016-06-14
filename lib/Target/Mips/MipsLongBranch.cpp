@@ -73,11 +73,16 @@ namespace {
 
     bool runOnMachineFunction(MachineFunction &F) override;
 
+    MachineFunctionProperties getRequiredProperties() const override {
+      return MachineFunctionProperties().set(
+          MachineFunctionProperties::Property::AllVRegsAllocated);
+    }
+
   private:
     void splitMBB(MachineBasicBlock *MBB);
     void initMBBInfo();
     int64_t computeOffset(const MachineInstr *Br);
-    void replaceBranch(MachineBasicBlock &MBB, Iter Br, DebugLoc DL,
+    void replaceBranch(MachineBasicBlock &MBB, Iter Br, const DebugLoc &DL,
                        MachineBasicBlock *MBBOpnd);
     void expandToLongBranch(MBBInfo &Info);
 
@@ -113,7 +118,7 @@ static MachineBasicBlock *getTargetMBB(const MachineInstr &Br) {
 
 // Traverse the list of instructions backwards until a non-debug instruction is
 // found or it reaches E.
-static ReverseIter getNonDebugInstr(ReverseIter B, ReverseIter E) {
+static ReverseIter getNonDebugInstr(ReverseIter B, const ReverseIter &E) {
   for (; B != E; ++B)
     if (!B->isDebugValue())
       return B;
@@ -148,7 +153,7 @@ void MipsLongBranch::splitMBB(MachineBasicBlock *MBB) {
   // Insert NewMBB and fix control flow.
   MachineBasicBlock *Tgt = getTargetMBB(*FirstBr);
   NewMBB->transferSuccessors(MBB);
-  NewMBB->removeSuccessor(Tgt);
+  NewMBB->removeSuccessor(Tgt, true);
   MBB->addSuccessor(NewMBB);
   MBB->addSuccessor(Tgt);
   MF->insert(std::next(MachineFunction::iterator(MBB)), NewMBB);
@@ -160,8 +165,8 @@ void MipsLongBranch::splitMBB(MachineBasicBlock *MBB) {
 void MipsLongBranch::initMBBInfo() {
   // Split the MBBs if they have two branches. Each basic block should have at
   // most one branch after this loop is executed.
-  for (MachineFunction::iterator I = MF->begin(), E = MF->end(); I != E;)
-    splitMBB(I++);
+  for (auto &MBB : *MF)
+    splitMBB(&MBB);
 
   MF->RenumberBlocks();
   MBBInfos.clear();
@@ -213,7 +218,8 @@ int64_t MipsLongBranch::computeOffset(const MachineInstr *Br) {
 // Replace Br with a branch which has the opposite condition code and a
 // MachineBasicBlock operand MBBOpnd.
 void MipsLongBranch::replaceBranch(MachineBasicBlock &MBB, Iter Br,
-                                   DebugLoc DL, MachineBasicBlock *MBBOpnd) {
+                                   const DebugLoc &DL,
+                                   MachineBasicBlock *MBBOpnd) {
   const MipsInstrInfo *TII = static_cast<const MipsInstrInfo *>(
       MBB.getParent()->getSubtarget().getInstrInfo());
   unsigned NewOpc = TII->getOppositeBranchOpc(Br->getOpcode());
@@ -262,8 +268,7 @@ void MipsLongBranch::expandToLongBranch(MBBInfo &I) {
       static_cast<const MipsInstrInfo *>(Subtarget.getInstrInfo());
 
   MF->insert(FallThroughMBB, LongBrMBB);
-  MBB->removeSuccessor(TgtMBB);
-  MBB->addSuccessor(LongBrMBB);
+  MBB->replaceSuccessor(TgtMBB, LongBrMBB);
 
   if (IsPIC) {
     MachineBasicBlock *BalTgtMBB = MF->CreateMachineBasicBlock(BB);
@@ -434,7 +439,7 @@ void MipsLongBranch::expandToLongBranch(MBBInfo &I) {
     I.Br->addOperand(MachineOperand::CreateMBB(LongBrMBB));
   } else
     // Change branch destination and reverse condition.
-    replaceBranch(*MBB, I.Br, DL, FallThroughMBB);
+    replaceBranch(*MBB, I.Br, DL, &*FallThroughMBB);
 }
 
 static void emitGPDisp(MachineFunction &F, const MipsInstrInfo *TII) {

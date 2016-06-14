@@ -1,4 +1,4 @@
-//===- tools/dsymutil/DebugMap.h - Generic debug map representation -------===//
+//=== tools/dsymutil/DebugMap.h - Generic debug map representation -*- C++ -*-//
 //
 //                             The LLVM Linker
 //
@@ -66,6 +66,7 @@ class DebugMapObject;
 /// }
 class DebugMap {
   Triple BinaryTriple;
+  std::string BinaryPath;
   typedef std::vector<std::unique_ptr<DebugMapObject>> ObjectContainer;
   ObjectContainer Objects;
 
@@ -76,7 +77,8 @@ class DebugMap {
   DebugMap() = default;
   ///@}
 public:
-  DebugMap(const Triple &BinaryTriple) : BinaryTriple(BinaryTriple) {}
+  DebugMap(const Triple &BinaryTriple, StringRef BinaryPath)
+      : BinaryTriple(BinaryTriple), BinaryPath(BinaryPath) {}
 
   typedef ObjectContainer::const_iterator const_iterator;
 
@@ -95,6 +97,8 @@ public:
 
   const Triple &getTriple() const { return BinaryTriple; }
 
+  StringRef getBinaryPath() const { return BinaryPath; }
+
   void print(raw_ostream &OS) const;
 
 #ifndef NDEBUG
@@ -102,7 +106,7 @@ public:
 #endif
 
   /// Read a debug map for \a InputFile.
-  static ErrorOr<std::unique_ptr<DebugMap>>
+  static ErrorOr<std::vector<std::unique_ptr<DebugMap>>>
   parseYAMLDebugMap(StringRef InputFile, StringRef PrependPath, bool Verbose);
 };
 
@@ -113,12 +117,15 @@ public:
 class DebugMapObject {
 public:
   struct SymbolMapping {
-    yaml::Hex64 ObjectAddress;
+    Optional<yaml::Hex64> ObjectAddress;
     yaml::Hex64 BinaryAddress;
     yaml::Hex32 Size;
-    SymbolMapping(uint64_t ObjectAddress, uint64_t BinaryAddress, uint32_t Size)
-        : ObjectAddress(ObjectAddress), BinaryAddress(BinaryAddress),
-          Size(Size) {}
+    SymbolMapping(Optional<uint64_t> ObjectAddr, uint64_t BinaryAddress,
+                  uint32_t Size)
+        : BinaryAddress(BinaryAddress), Size(Size) {
+      if (ObjectAddr)
+        ObjectAddress = *ObjectAddr;
+    }
     /// For YAML IO support
     SymbolMapping() = default;
   };
@@ -128,7 +135,7 @@ public:
   /// \brief Adds a symbol mapping to this DebugMapObject.
   /// \returns false if the symbol was already registered. The request
   /// is discarded in this case.
-  bool addSymbol(llvm::StringRef SymName, uint64_t ObjectAddress,
+  bool addSymbol(llvm::StringRef SymName, Optional<uint64_t> ObjectAddress,
                  uint64_t LinkedAddress, uint32_t Size);
 
   /// \brief Lookup a symbol mapping.

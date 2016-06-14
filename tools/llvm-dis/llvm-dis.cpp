@@ -134,10 +134,10 @@ static void diagnosticHandler(const DiagnosticInfo &DI, void *Context) {
 
 int main(int argc, char **argv) {
   // Print a stack trace if we signal out.
-  sys::PrintStackTraceOnErrorSignal();
+  sys::PrintStackTraceOnErrorSignal(argv[0]);
   PrettyStackTraceProgram X(argc, argv);
 
-  LLVMContext &Context = getGlobalContext();
+  LLVMContext Context;
   llvm_shutdown_obj Y;  // Call llvm_shutdown() on exit.
 
   Context.setDiagnosticHandler(diagnosticHandler, argv[0]);
@@ -159,7 +159,7 @@ int main(int argc, char **argv) {
     ErrorOr<std::unique_ptr<Module>> MOrErr =
         getStreamedBitcodeModule(DisplayFilename, std::move(Streamer), Context);
     M = std::move(*MOrErr);
-    M->materializeAllPermanently();
+    M->materializeAll();
   } else {
     errs() << argv[0] << ": " << ErrorMessage << '\n';
     return 1;
