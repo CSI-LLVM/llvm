@@ -189,12 +189,6 @@ private:
   }
 };
 
-typedef struct {
-  unsigned unused;
-  bool unused2, unused3;
-  bool read_before_write_in_bb;
-} csi_acc_prop_t;
-
 struct ComprehensiveStaticInstrumentation : public ModulePass {
   static char ID;
 
@@ -213,7 +207,7 @@ private:
 
   int getNumBytesAccessed(Value *Addr, const DataLayout &DL);
   void computeAttributesForMemoryAccesses(
-      SmallVectorImpl<std::pair<BasicBlock::iterator, csi_acc_prop_t> > &Accesses,
+      SmallVectorImpl<std::pair<BasicBlock::iterator, uint64_t> > &Accesses,
       SmallVectorImpl<BasicBlock::iterator> &LocalAccesses);
 
   void addLoadStoreInstrumentation(BasicBlock::iterator Iter,
@@ -223,9 +217,9 @@ private:
                                    Type *AddrType,
                                    Value *Addr,
                                    int NumBytes,
-                                   csi_acc_prop_t prop);
+                                   uint64_t Prop);
 
-  void instrumentLoadOrStore(BasicBlock::iterator Iter, csi_acc_prop_t prop, const DataLayout &DL);
+  void instrumentLoadOrStore(BasicBlock::iterator Iter, uint64_t Prop, const DataLayout &DL);
   void instrumentMemIntrinsic(BasicBlock::iterator I);
   void instrumentCallsite(BasicBlock::iterator I);
   void instrumentBasicBlock(BasicBlock &BB);
@@ -348,38 +342,20 @@ void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(BasicBlock:
                                                          Type *AddrType,
                                                          Value *Addr,
                                                          int NumBytes,
-                                                         csi_acc_prop_t prop) {
-  IRBuilder<> IRB(&(*Iter));
-  IRB.CreateCall(BeforeFn,
-      // XXX: should I just use the pointer type with the right size?
-      {CsiId,
-       IRB.CreatePointerCast(Addr, AddrType),
-       IRB.getInt32(NumBytes),
-       IRB.getInt64(0)});  // TODO(ddoucet): fix this
-       /* IRB.getInt32(prop.unused),
-       IRB.getInt1(prop.unused2),
-       IRB.getInt1(prop.unused3),
-       IRB.getInt1(prop.read_before_write_in_bb)}); */
+                                                         uint64_t Prop) {
+  IRBuilder<> IRB(&*Iter);
+  IRB.CreateCall(BeforeFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
+       IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
 
-  // The iterator currently points between the inserted instruction and the
-  // store instruction. We now want to insert an instruction after the store
-  // instruction.
   Iter++;
   IRB.SetInsertPoint(&*Iter);
 
-  IRB.CreateCall(AfterFn,
-      {CsiId,
-       IRB.CreatePointerCast(Addr, AddrType),
-       IRB.getInt32(NumBytes),
-       IRB.getInt64(0)});  // TODO(ddoucet): fix this
-       /* IRB.getInt32(prop.unused),
-       IRB.getInt1(prop.unused2),
-       IRB.getInt1(prop.unused3),
-       IRB.getInt1(prop.read_before_write_in_bb)}); */
+  IRB.CreateCall(AfterFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
+       IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
 }
 
 void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::iterator Iter,
-                                                   csi_acc_prop_t prop,
+                                                   uint64_t Prop,
                                                    const DataLayout &DL) {
   Instruction *I = &*Iter;
   IRBuilder<> IRB(I);
@@ -397,12 +373,12 @@ void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(BasicBlock::itera
     uint64_t LocalId = StoreFED.add(*I);
     Value *CsiId = StoreFED.localToGlobalId(LocalId, IRB);
     addLoadStoreInstrumentation(
-        Iter, CsiBeforeWrite, CsiAfterWrite, CsiId, AddrType, Addr, NumBytes, prop);
+        Iter, CsiBeforeWrite, CsiAfterWrite, CsiId, AddrType, Addr, NumBytes, Prop);
   } else { // is read
     uint64_t LocalId = LoadFED.add(*I);
     Value *CsiId = LoadFED.localToGlobalId(LocalId, IRB);
     addLoadStoreInstrumentation(
-        Iter, CsiBeforeRead, CsiAfterRead, CsiId, AddrType, Addr, NumBytes, prop);
+        Iter, CsiBeforeRead, CsiAfterRead, CsiId, AddrType, Addr, NumBytes, Prop);
   }
 }
 
@@ -623,7 +599,7 @@ bool ComprehensiveStaticInstrumentation::shouldNotInstrumentFunction(Function &F
 }
 
 void ComprehensiveStaticInstrumentation::computeAttributesForMemoryAccesses(
-    SmallVectorImpl<std::pair<BasicBlock::iterator, csi_acc_prop_t> > &MemoryAccesses,
+    SmallVectorImpl<std::pair<BasicBlock::iterator, uint64_t> > &MemoryAccesses,
     SmallVectorImpl<BasicBlock::iterator> &LocalAccesses) {
   SmallSet<Value*, 8> WriteTargets;
 
@@ -633,14 +609,13 @@ void ComprehensiveStaticInstrumentation::computeAttributesForMemoryAccesses(
     Instruction *I = &(*II);
     if (StoreInst *Store = dyn_cast<StoreInst>(I)) {
       WriteTargets.insert(Store->getPointerOperand());
-      MemoryAccesses.push_back(
-        std::make_pair(II, csi_acc_prop_t{0, false, false, false}));
+      MemoryAccesses.push_back(std::make_pair(II, 0));
     } else {
       LoadInst *Load = cast<LoadInst>(I);
       Value *Addr = Load->getPointerOperand();
       bool HasBeenSeen = WriteTargets.count(Addr) > 0;
-      MemoryAccesses.push_back(
-        std::make_pair(II, csi_acc_prop_t{0, false, false, HasBeenSeen}));
+      uint64_t Prop = HasBeenSeen ? 1 : 0;
+      MemoryAccesses.push_back(std::make_pair(II, Prop));
     }
   }
   LocalAccesses.clear();
@@ -664,7 +639,7 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
     return;
   }
 
-  SmallVector<std::pair<BasicBlock::iterator, csi_acc_prop_t>, 8> MemoryAccesses;
+  SmallVector<std::pair<BasicBlock::iterator, uint64_t>, 8> MemoryAccesses;
   SmallSet<Value*, 8> WriteTargets;
   SmallVector<BasicBlock::iterator, 8> LocalMemoryAccesses;
 
@@ -694,7 +669,7 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
 
   // Do this work in a separate loop after copying the iterators so that we
   // aren't modifying the list as we're iterating.
-  for (std::pair<BasicBlock::iterator, csi_acc_prop_t> p : MemoryAccesses)
+  for (std::pair<BasicBlock::iterator, uint64_t> p : MemoryAccesses)
     instrumentLoadOrStore(p.first, p.second, DL);
 
   for (BasicBlock::iterator I : MemIntrinsics)
