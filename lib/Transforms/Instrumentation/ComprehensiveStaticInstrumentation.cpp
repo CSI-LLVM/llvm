@@ -42,6 +42,40 @@ DILocation *getFirstDebugLoc(BasicBlock &BB) {
   return nullptr;
 }
 
+/// Set DebugLoc on the call instruction to a CSI hook, based on the
+/// debug information of the instrumented instruction.
+void setInstrumentationDebugLoc(Instruction *Instrumented, Instruction *Call) {
+  DISubprogram *Subprog = Instrumented->getFunction()->getSubprogram();
+  if (Subprog) {
+    if (Instrumented->getDebugLoc()) {
+      Call->setDebugLoc(Instrumented->getDebugLoc());
+    } else {
+      LLVMContext &C = Instrumented->getFunction()->getParent()->getContext();
+      Call->setDebugLoc(DILocation::get(C, 0, 0, Subprog));
+    }
+  }
+}
+
+/// Set DebugLoc on the call instruction to a CSI hook, based on the
+/// debug information of the instrumented instruction.
+void setInstrumentationDebugLoc(BasicBlock &Instrumented, Instruction *Call) {
+  DISubprogram *Subprog = Instrumented.getParent()->getSubprogram();
+  if (Subprog) {
+    LLVMContext &C = Instrumented.getParent()->getParent()->getContext();
+    Call->setDebugLoc(DILocation::get(C, 0, 0, Subprog));
+  }
+}
+
+/// Set DebugLoc on the call instruction to a CSI hook, based on the
+/// debug information of the instrumented instruction.
+void setInstrumentationDebugLoc(Function &Instrumented, Instruction *Call) {
+  DISubprogram *Subprog = Instrumented.getSubprogram();
+  if (Subprog) {
+    LLVMContext &C = Instrumented.getParent()->getContext();
+    Call->setDebugLoc(DILocation::get(C, 0, 0, Subprog));
+  }
+}
+
 /// Maintains a mapping from CSI ID to front-end data for that ID.
 ///
 /// The front-end data currently is the source location that a given
@@ -400,15 +434,17 @@ void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(
     Instruction *I, Function *BeforeFn, Function *AfterFn, Value *CsiId,
     Type *AddrType, Value *Addr, int NumBytes, uint64_t Prop) {
   IRBuilder<> IRB(I);
-  IRB.CreateCall(BeforeFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
-                            IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
+  Instruction *Call = IRB.CreateCall(BeforeFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
+              IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
+  setInstrumentationDebugLoc(I, Call);
 
   BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
 
-  IRB.CreateCall(AfterFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
-                           IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
+  Call = IRB.CreateCall(AfterFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
+              IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
+  setInstrumentationDebugLoc(I, Call);
 }
 
 void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(
@@ -448,18 +484,20 @@ void ComprehensiveStaticInstrumentation::instrumentMemIntrinsic(
     Instruction *I) {
   IRBuilder<> IRB(I);
   if (MemSetInst *M = dyn_cast<MemSetInst>(I)) {
-    IRB.CreateCall(
-        MemsetFn,
-        {IRB.CreatePointerCast(M->getArgOperand(0), IRB.getInt8PtrTy()),
-         IRB.CreateIntCast(M->getArgOperand(1), IRB.getInt32Ty(), false),
-         IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    Instruction *Call = IRB.CreateCall(
+                                       MemsetFn,
+                                       {IRB.CreatePointerCast(M->getArgOperand(0), IRB.getInt8PtrTy()),
+                                           IRB.CreateIntCast(M->getArgOperand(1), IRB.getInt32Ty(), false),
+                                           IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    setInstrumentationDebugLoc(I, Call);
     I->eraseFromParent();
   } else if (MemTransferInst *M = dyn_cast<MemTransferInst>(I)) {
-    IRB.CreateCall(
-        isa<MemCpyInst>(M) ? MemcpyFn : MemmoveFn,
-        {IRB.CreatePointerCast(M->getArgOperand(0), IRB.getInt8PtrTy()),
-         IRB.CreatePointerCast(M->getArgOperand(1), IRB.getInt8PtrTy()),
-         IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    Instruction *Call = IRB.CreateCall(
+                                       isa<MemCpyInst>(M) ? MemcpyFn : MemmoveFn,
+                                       {IRB.CreatePointerCast(M->getArgOperand(0), IRB.getInt8PtrTy()),
+                                           IRB.CreatePointerCast(M->getArgOperand(1), IRB.getInt8PtrTy()),
+                                           IRB.CreateIntCast(M->getArgOperand(2), IntptrTy, false)});
+    setInstrumentationDebugLoc(I, Call);
     I->eraseFromParent();
   }
 }
@@ -469,11 +507,13 @@ void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
 
-  IRB.CreateCall(CsiBBEntry, {CsiId});
+  Instruction *Call = IRB.CreateCall(CsiBBEntry, {CsiId});
+  setInstrumentationDebugLoc(BB, Call);
 
   TerminatorInst *TI = BB.getTerminator();
   IRB.SetInsertPoint(TI);
-  IRB.CreateCall(CsiBBExit, {CsiId});
+  Call = IRB.CreateCall(CsiBBExit, {CsiId});
+  setInstrumentationDebugLoc(BB, Call);
 }
 
 void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
@@ -499,12 +539,14 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
   FuncIdGV->setInitializer(IRB.getInt64(CsiCallsiteUnknownTargetId));
 
   Value *FuncId = IRB.CreateLoad(FuncIdGV);
-  IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId});
+  Instruction *Call = IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId});
+  setInstrumentationDebugLoc(I, Call);
 
   BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
-  IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId});
+  Call = IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId});
+  setInstrumentationDebugLoc(I, Call);
 }
 
 void ComprehensiveStaticInstrumentation::initializeFEDTables(Module &M) {
@@ -767,12 +809,14 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
 
   Value *FuncId = FunctionFED.localToGlobalId(LocalId, IRB);
-  IRB.CreateCall(CsiFuncEntry, {FuncId});
+  Instruction *Call = IRB.CreateCall(CsiFuncEntry, {FuncId});
+  setInstrumentationDebugLoc(F, Call);
 
   for (Instruction *I : ReturnInstructions) {
     IRBuilder<> IRBRet(I);
     uint64_t ExitLocalId = FunctionExitFED.add(F);
     Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
-    IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId});
+    Call = IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId});
+    setInstrumentationDebugLoc(F, Call);
   }
 }
