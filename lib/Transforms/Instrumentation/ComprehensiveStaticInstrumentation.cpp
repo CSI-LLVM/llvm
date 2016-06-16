@@ -336,7 +336,7 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
     const SourceLocation &E = it.second;
     Value *Line = ConstantInt::get(Int32Ty, E.Line);
     Constant *FileStrConstant = ConstantDataArray::getString(C, E.File);
-    GlobalVariable *GV = M.getGlobalVariable("__csi_unit_filename");
+    GlobalVariable *GV = M.getGlobalVariable("__csi_unit_filename", true);
     if (GV == NULL) {
       GV = new GlobalVariable(M, FileStrConstant->getType(),
               true, GlobalValue::PrivateLinkage,
