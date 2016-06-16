@@ -756,7 +756,6 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   }
 
   SmallVector<std::pair<Instruction *, uint64_t>, 8> LoadAndStoreProperties;
-  SmallVector<Instruction *, 8> BBLoadsAndStores;
   SmallVector<Instruction *, 8> ReturnInstructions;
   SmallVector<Instruction *, 8> MemIntrinsics;
   SmallVector<Instruction *, 8> Callsites;
@@ -765,6 +764,7 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   // Traverse all instructions in a function and insert instrumentation
   // on load & store
   for (BasicBlock &BB : F) {
+    SmallVector<Instruction *, 8> BBLoadsAndStores;
     for (Instruction &I : BB) {
       if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
         BBLoadsAndStores.push_back(&I);
@@ -775,7 +775,6 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
         if (isa<MemIntrinsic>(I)) {
           MemIntrinsics.push_back(&I);
         }
-        computeLoadAndStoreProperties(LoadAndStoreProperties, BBLoadsAndStores);
       }
     }
     computeLoadAndStoreProperties(LoadAndStoreProperties, BBLoadsAndStores);
