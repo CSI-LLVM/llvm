@@ -15,8 +15,16 @@ entry:
   ret i32 1
 }
 
+; CHECK: @__csi_unit_func_base_id = internal global i64 0
+; CHECK: @__csi_unit_func_exit_base_id = internal global i64 0
+; CHECK: @__csi_unit_bb_base_id = internal global i64 0
+; CHECK: @__csi_unit_callsite_base_id = internal global i64 0
+; CHECK: @__csi_unit_load_base_id = internal global i64 0
+; CHECK: @__csi_unit_store_base_id = internal global i64 0
+; CHECK: @__csi_func_id_foo = weak global i64 -1
+; CHECK: @__csi_func_id_main = weak global i64 -1
+; CHECK: @__csi_unit_filename = private unnamed_addr constant [1 x i8] zeroinitializer
 ; CHECK: @0 = private unnamed_addr constant [8 x i8] c"<stdin>\00"
-
 ; CHECK: @llvm.global_ctors = appending global [1 x { i32, void ()*, i8* }] [{ i32, void ()*, i8* } { i32 65535, void ()* @csirt.unit_ctor, i8* null }]
 
 ; CHECK: declare void @__csi_func_entry(i64)
