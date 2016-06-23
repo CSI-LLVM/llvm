@@ -583,6 +583,8 @@ void ComprehensiveStaticInstrumentation::generateInitCallsiteToFunction(
 }
 
 void ComprehensiveStaticInstrumentation::initializeCsi(Module &M) {
+  IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
+
   initializeFEDTables(M);
   initializeFuncHooks(M);
   initializeLoadStoreHooks(M);
@@ -597,7 +599,6 @@ void ComprehensiveStaticInstrumentation::initializeCsi(Module &M) {
   InitCallsiteToFunction->setLinkage(GlobalValue::InternalLinkage);
 
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
-  IntptrTy = M.getDataLayout().getIntPtrType(M.getContext());
 }
 
 // Create a struct type to match the unit_fed_entry_t type in csirt.c.
