@@ -1334,8 +1334,8 @@ bool MemCpyOptPass::iterateOnFunction(Function &F) {
   bool MadeChange = false;
 
   // Walk all instruction in the function.
-  for (Function::iterator BB = F.begin(), BBE = F.end(); BB != BBE; ++BB) {
-    for (BasicBlock::iterator BI = BB->begin(), BE = BB->end(); BI != BE;) {
+  for (BasicBlock &BB : F) {
+    for (BasicBlock::iterator BI = BB.begin(), BE = BB.end(); BI != BE;) {
       // Avoid invalidating the iterator.
       Instruction *I = &*BI++;
 
@@ -1357,7 +1357,8 @@ bool MemCpyOptPass::iterateOnFunction(Function &F) {
 
       // Reprocess the instruction if desired.
       if (RepeatInstruction) {
-        if (BI != BB->begin()) --BI;
+        if (BI != BB.begin())
+          --BI;
         MadeChange = true;
       }
     }
@@ -1399,9 +1400,9 @@ bool MemCpyOptPass::runImpl(
   bool MadeChange = false;
   MD = MD_;
   TLI = TLI_;
-  LookupAliasAnalysis = LookupAliasAnalysis_;
-  LookupAssumptionCache = LookupAssumptionCache_;
-  LookupDomTree = LookupDomTree_;
+  LookupAliasAnalysis = std::move(LookupAliasAnalysis_);
+  LookupAssumptionCache = std::move(LookupAssumptionCache_);
+  LookupDomTree = std::move(LookupDomTree_);
 
   // If we don't have at least memset and memcpy, there is little point of doing
   // anything here.  These are required by a freestanding implementation, so if

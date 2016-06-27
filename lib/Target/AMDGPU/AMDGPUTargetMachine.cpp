@@ -36,9 +36,14 @@
 #include "llvm/Support/raw_os_ostream.h"
 #include "llvm/Transforms/IPO.h"
 #include "llvm/Transforms/Scalar.h"
-#include <llvm/CodeGen/Passes.h>
+#include "llvm/Transforms/Scalar/GVN.h"
 
 using namespace llvm;
+
+static cl::opt<bool> EnableR600StructurizeCFG(
+  "r600-ir-structurize",
+  cl::desc("Use StructurizeCFG IR pass"),
+  cl::init(true));
 
 extern "C" void LLVMInitializeAMDGPUTarget() {
   // Register the target
@@ -55,6 +60,7 @@ extern "C" void LLVMInitializeAMDGPUTarget() {
   initializeAMDGPUAnnotateKernelFeaturesPass(*PR);
   initializeAMDGPUAnnotateUniformValuesPass(*PR);
   initializeAMDGPUPromoteAllocaPass(*PR);
+  initializeAMDGPUCodeGenPreparePass(*PR);
   initializeSIAnnotateControlFlowPass(*PR);
   initializeSIDebuggerInsertNopsPass(*PR);
   initializeSIInsertWaitsPass(*PR);
@@ -117,10 +123,10 @@ AMDGPUTargetMachine::AMDGPUTargetMachine(const Target &T, const Triple &TT,
                                          Optional<Reloc::Model> RM,
                                          CodeModel::Model CM,
                                          CodeGenOpt::Level OptLevel)
-    : LLVMTargetMachine(T, computeDataLayout(TT), TT, getGPUOrDefault(TT, CPU),
-                        FS, Options, getEffectiveRelocModel(RM), CM, OptLevel),
-      TLOF(createTLOF(getTargetTriple())),
-      Subtarget(TT, getTargetCPU(), FS, *this), IntrinsicInfo() {
+  : LLVMTargetMachine(T, computeDataLayout(TT), TT, getGPUOrDefault(TT, CPU),
+                      FS, Options, getEffectiveRelocModel(RM), CM, OptLevel),
+    TLOF(createTLOF(getTargetTriple())),
+    IntrinsicInfo() {
   setRequiresStructuredCFG(true);
   initAsmInfo();
 }
@@ -136,7 +142,8 @@ R600TargetMachine::R600TargetMachine(const Target &T, const Triple &TT,
                                      TargetOptions Options,
                                      Optional<Reloc::Model> RM,
                                      CodeModel::Model CM, CodeGenOpt::Level OL)
-    : AMDGPUTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL) {}
+  : AMDGPUTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL),
+    Subtarget(TT, getTargetCPU(), FS, *this) {}
 
 //===----------------------------------------------------------------------===//
 // GCN Target Machine (SI+)
@@ -147,7 +154,8 @@ GCNTargetMachine::GCNTargetMachine(const Target &T, const Triple &TT,
                                    TargetOptions Options,
                                    Optional<Reloc::Model> RM,
                                    CodeModel::Model CM, CodeGenOpt::Level OL)
-    : AMDGPUTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL) {}
+  : AMDGPUTargetMachine(T, TT, CPU, FS, Options, RM, CM, OL),
+    Subtarget(TT, getTargetCPU(), FS, *this) {}
 
 //===----------------------------------------------------------------------===//
 // AMDGPU Pass Setup
@@ -170,18 +178,9 @@ public:
     return getTM<AMDGPUTargetMachine>();
   }
 
-  ScheduleDAGInstrs *
-  createMachineScheduler(MachineSchedContext *C) const override {
-    const AMDGPUSubtarget &ST = *getAMDGPUTargetMachine().getSubtargetImpl();
-    if (ST.getGeneration() <= AMDGPUSubtarget::NORTHERN_ISLANDS)
-      return createR600MachineScheduler(C);
-    else if (ST.enableSIScheduler())
-      return createSIMachineScheduler(C);
-    return nullptr;
-  }
-
+  void addEarlyCSEOrGVNPass();
+  void addStraightLineScalarOptimizationPasses();
   void addIRPasses() override;
-  void addCodeGenPrepare() override;
   bool addPreISel() override;
   bool addInstSelector() override;
   bool addGCPasses() override;
@@ -191,6 +190,11 @@ class R600PassConfig final : public AMDGPUPassConfig {
 public:
   R600PassConfig(TargetMachine *TM, PassManagerBase &PM)
     : AMDGPUPassConfig(TM, PM) { }
+
+  ScheduleDAGInstrs *createMachineScheduler(
+    MachineSchedContext *C) const override {
+    return createR600MachineScheduler(C);
+  }
 
   bool addPreISel() override;
   void addPreRegAlloc() override;
@@ -202,6 +206,19 @@ class GCNPassConfig final : public AMDGPUPassConfig {
 public:
   GCNPassConfig(TargetMachine *TM, PassManagerBase &PM)
     : AMDGPUPassConfig(TM, PM) { }
+
+  GCNTargetMachine &getGCNTargetMachine() const {
+    return getTM<GCNTargetMachine>();
+  }
+
+  ScheduleDAGInstrs *
+  createMachineScheduler(MachineSchedContext *C) const override {
+    const SISubtarget *ST = getGCNTargetMachine().getSubtargetImpl();
+    if (ST->enableSIScheduler())
+      return createSIMachineScheduler(C);
+    return nullptr;
+  }
+
   bool addPreISel() override;
   void addMachineSSAOptimization() override;
   bool addInstSelector() override;
@@ -225,6 +242,29 @@ TargetIRAnalysis AMDGPUTargetMachine::getTargetIRAnalysis() {
   });
 }
 
+void AMDGPUPassConfig::addEarlyCSEOrGVNPass() {
+  if (getOptLevel() == CodeGenOpt::Aggressive)
+    addPass(createGVNPass());
+  else
+    addPass(createEarlyCSEPass());
+}
+
+void AMDGPUPassConfig::addStraightLineScalarOptimizationPasses() {
+  addPass(createSeparateConstOffsetFromGEPPass());
+  addPass(createSpeculativeExecutionPass());
+  // ReassociateGEPs exposes more opportunites for SLSR. See
+  // the example in reassociate-geps-and-slsr.ll.
+  addPass(createStraightLineStrengthReducePass());
+  // SeparateConstOffsetFromGEP and SLSR creates common expressions which GVN or
+  // EarlyCSE can reuse.
+  addEarlyCSEOrGVNPass();
+  // Run NaryReassociate after EarlyCSE/GVN to be more effective.
+  addPass(createNaryReassociatePass());
+  // NaryReassociate on GEPs creates redundant common expressions, so run
+  // EarlyCSE after it.
+  addPass(createEarlyCSEPass());
+}
+
 void AMDGPUPassConfig::addIRPasses() {
   // There is no reason to run these.
   disablePass(&StackMapLivenessID);
@@ -244,21 +284,34 @@ void AMDGPUPassConfig::addIRPasses() {
   // Handle uses of OpenCL image2d_t, image3d_t and sampler_t arguments.
   addPass(createAMDGPUOpenCLImageTypeLoweringPass());
 
-  TargetPassConfig::addIRPasses();
-}
-
-void AMDGPUPassConfig::addCodeGenPrepare() {
   const AMDGPUTargetMachine &TM = getAMDGPUTargetMachine();
   const AMDGPUSubtarget &ST = *TM.getSubtargetImpl();
   if (TM.getOptLevel() > CodeGenOpt::None && ST.isPromoteAllocaEnabled()) {
     addPass(createAMDGPUPromoteAlloca(&TM));
     addPass(createSROAPass());
   }
-  TargetPassConfig::addCodeGenPrepare();
+
+  addStraightLineScalarOptimizationPasses();
+
+  TargetPassConfig::addIRPasses();
+
+  // EarlyCSE is not always strong enough to clean up what LSR produces. For
+  // example, GVN can combine
+  //
+  //   %0 = add %a, %b
+  //   %1 = add %b, %a
+  //
+  // and
+  //
+  //   %0 = shl nsw %a, 2
+  //   %1 = shl %a, 2
+  //
+  // but EarlyCSE can do neither of them.
+  if (getOptLevel() != CodeGenOpt::None)
+    addEarlyCSEOrGVNPass();
 }
 
-bool
-AMDGPUPassConfig::addPreISel() {
+bool AMDGPUPassConfig::addPreISel() {
   addPass(createFlattenCFGPass());
   return false;
 }
@@ -279,8 +332,8 @@ bool AMDGPUPassConfig::addGCPasses() {
 
 bool R600PassConfig::addPreISel() {
   AMDGPUPassConfig::addPreISel();
-  const AMDGPUSubtarget &ST = *getAMDGPUTargetMachine().getSubtargetImpl();
-  if (ST.IsIRStructurizerEnabled())
+
+  if (EnableR600StructurizeCFG)
     addPass(createStructurizeCFGPass());
   addPass(createR600TextureIntrinsicsReplacer());
   return false;
@@ -362,7 +415,7 @@ bool GCNPassConfig::addRegBankSelect() {
 #endif
 
 void GCNPassConfig::addPreRegAlloc() {
-  const AMDGPUSubtarget &ST = *getAMDGPUTargetMachine().getSubtargetImpl();
+  const SISubtarget &ST = *getGCNTargetMachine().getSubtargetImpl();
 
   // This needs to be run directly before register allocation because
   // earlier passes might recompute live intervals.
@@ -380,7 +433,7 @@ void GCNPassConfig::addPreRegAlloc() {
     insertPass(&MachineSchedulerID, &SILoadStoreOptimizerID);
     insertPass(&MachineSchedulerID, &RegisterCoalescerID);
   }
-  addPass(createSIShrinkInstructionsPass(), false);
+  addPass(createSIShrinkInstructionsPass());
   addPass(createSIWholeQuadModePass());
 }
 
@@ -409,8 +462,8 @@ void GCNPassConfig::addPreEmitPass() {
 
   addPass(createSIInsertWaitsPass());
   addPass(createSIShrinkInstructionsPass());
-  addPass(createSILowerControlFlowPass(), false);
-  addPass(createSIDebuggerInsertNopsPass(), false);
+  addPass(createSILowerControlFlowPass());
+  addPass(createSIDebuggerInsertNopsPass());
 }
 
 TargetPassConfig *GCNTargetMachine::createPassConfig(PassManagerBase &PM) {

@@ -99,8 +99,6 @@ private:
   Constant *getEmitFunctionFunc();
   Constant *getEmitArcsFunc();
   Constant *getSummaryInfoFunc();
-  Constant *getDeleteWriteoutFunctionListFunc();
-  Constant *getDeleteFlushFunctionListFunc();
   Constant *getEndFileFunc();
 
   // Create or retrieve an i32 state value that is used to represent the
@@ -267,10 +265,9 @@ namespace {
     void writeOut() {
       uint32_t Len = 3;
       SmallVector<StringMapEntry<GCOVLines *> *, 32> SortedLinesByFile;
-      for (StringMap<GCOVLines *>::iterator I = LinesByFile.begin(),
-               E = LinesByFile.end(); I != E; ++I) {
-        Len += I->second->length();
-        SortedLinesByFile.push_back(&*I);
+      for (auto &I : LinesByFile) {
+        Len += I.second->length();
+        SortedLinesByFile.push_back(&I);
       }
 
       writeBytes(LinesTag, 4);
@@ -282,10 +279,8 @@ namespace {
                    StringMapEntry<GCOVLines *> *RHS) {
         return LHS->getKey() < RHS->getKey();
       });
-      for (SmallVectorImpl<StringMapEntry<GCOVLines *> *>::iterator
-               I = SortedLinesByFile.begin(), E = SortedLinesByFile.end();
-           I != E; ++I)
-        (*I)->getValue()->writeOut();
+      for (auto &I : SortedLinesByFile)
+        I->getValue()->writeOut();
       write(0);
       write(0);
     }
@@ -691,7 +686,7 @@ bool GCOVProfiler::emitProfileArcs() {
     FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), false);
     Function *F = Function::Create(FTy, GlobalValue::InternalLinkage,
                                    "__llvm_gcov_init", M);
-    F->setUnnamedAddr(true);
+    F->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
     F->setLinkage(GlobalValue::InternalLinkage);
     F->addFnAttr(Attribute::NoInline);
     if (Options.NoRedZone)
@@ -744,8 +739,8 @@ GlobalVariable *GCOVProfiler::buildEdgeLookupTable(
     EdgeTable[i] = NullValue;
 
   unsigned Edge = 0;
-  for (Function::iterator BB = F->begin(), E = F->end(); BB != E; ++BB) {
-    TerminatorInst *TI = BB->getTerminator();
+  for (BasicBlock &BB : *F) {
+    TerminatorInst *TI = BB.getTerminator();
     int Successors = isa<ReturnInst>(TI) ? 1 : TI->getNumSuccessors();
     if (Successors > 1 && !isa<BranchInst>(TI) && !isa<ReturnInst>(TI)) {
       for (int i = 0; i != Successors; ++i) {
@@ -754,7 +749,7 @@ GlobalVariable *GCOVProfiler::buildEdgeLookupTable(
         Value *Counter = Builder.CreateConstInBoundsGEP2_64(Counters, 0,
                                                             Edge + i);
         EdgeTable[((Succs.idFor(Succ) - 1) * Preds.size()) +
-                  (Preds.idFor(&*BB) - 1)] = cast<Constant>(Counter);
+                  (Preds.idFor(&BB) - 1)] = cast<Constant>(Counter);
       }
     }
     Edge += Successors;
@@ -766,7 +761,7 @@ GlobalVariable *GCOVProfiler::buildEdgeLookupTable(
           ConstantArray::get(EdgeTableTy,
                              makeArrayRef(&EdgeTable[0],TableSize)),
           "__llvm_gcda_edge_table");
-  EdgeTableGV->setUnnamedAddr(true);
+  EdgeTableGV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
   return EdgeTableGV;
 }
 
@@ -817,16 +812,6 @@ Constant *GCOVProfiler::getSummaryInfoFunc() {
   return M->getOrInsertFunction("llvm_gcda_summary_info", FTy);
 }
 
-Constant *GCOVProfiler::getDeleteWriteoutFunctionListFunc() {
-  FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), false);
-  return M->getOrInsertFunction("llvm_delete_writeout_function_list", FTy);
-}
-
-Constant *GCOVProfiler::getDeleteFlushFunctionListFunc() {
-  FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), false);
-  return M->getOrInsertFunction("llvm_delete_flush_function_list", FTy);
-}
-
 Constant *GCOVProfiler::getEndFileFunc() {
   FunctionType *FTy = FunctionType::get(Type::getVoidTy(*Ctx), false);
   return M->getOrInsertFunction("llvm_gcda_end_file", FTy);
@@ -840,7 +825,7 @@ GlobalVariable *GCOVProfiler::getEdgeStateValue() {
                             ConstantInt::get(Type::getInt32Ty(*Ctx),
                                              0xffffffff),
                             "__llvm_gcov_global_state_pred");
-    GV->setUnnamedAddr(true);
+    GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
   }
   return GV;
 }
@@ -852,7 +837,7 @@ Function *GCOVProfiler::insertCounterWriteout(
   if (!WriteoutF)
     WriteoutF = Function::Create(WriteoutFTy, GlobalValue::InternalLinkage,
                                  "__llvm_gcov_writeout", M);
-  WriteoutF->setUnnamedAddr(true);
+  WriteoutF->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
   WriteoutF->addFnAttr(Attribute::NoInline);
   if (Options.NoRedZone)
     WriteoutF->addFnAttr(Attribute::NoRedZone);
@@ -912,7 +897,7 @@ Function *GCOVProfiler::insertCounterWriteout(
 void GCOVProfiler::insertIndirectCounterIncrement() {
   Function *Fn =
     cast<Function>(GCOVProfiler::getIncrementIndirectCounterFunc());
-  Fn->setUnnamedAddr(true);
+  Fn->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
   Fn->setLinkage(GlobalValue::InternalLinkage);
   Fn->addFnAttr(Attribute::NoInline);
   if (Options.NoRedZone)
@@ -969,7 +954,7 @@ insertFlush(ArrayRef<std::pair<GlobalVariable*, MDNode*> > CountersBySP) {
                               "__llvm_gcov_flush", M);
   else
     FlushF->setLinkage(GlobalValue::InternalLinkage);
-  FlushF->setUnnamedAddr(true);
+  FlushF->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
   FlushF->addFnAttr(Attribute::NoInline);
   if (Options.NoRedZone)
     FlushF->addFnAttr(Attribute::NoRedZone);
@@ -984,10 +969,8 @@ insertFlush(ArrayRef<std::pair<GlobalVariable*, MDNode*> > CountersBySP) {
   Builder.CreateCall(WriteoutF, {});
 
   // Zero out the counters.
-  for (ArrayRef<std::pair<GlobalVariable *, MDNode *> >::iterator
-         I = CountersBySP.begin(), E = CountersBySP.end();
-       I != E; ++I) {
-    GlobalVariable *GV = I->first;
+  for (const auto &I : CountersBySP) {
+    GlobalVariable *GV = I.first;
     Constant *Null = Constant::getNullValue(GV->getValueType());
     Builder.CreateStore(Null, GV);
   }

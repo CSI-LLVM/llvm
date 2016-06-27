@@ -1433,11 +1433,10 @@ static bool isFuncletReturnInstr(MachineInstr *MI) {
 unsigned
 X86FrameLowering::getPSPSlotOffsetFromSP(const MachineFunction &MF) const {
   const WinEHFuncInfo &Info = *MF.getWinEHFuncInfo();
-  // getFrameIndexReferenceFromSP has an out ref parameter for the stack
-  // pointer register; pass a dummy that we ignore
   unsigned SPReg;
-  int Offset = getFrameIndexReferenceFromSP(MF, Info.PSPSymFrameIdx, SPReg);
-  assert(Offset >= 0);
+  int Offset = getFrameIndexReferencePreferSP(MF, Info.PSPSymFrameIdx, SPReg,
+                                              /*IgnoreSPUpdates*/ true);
+  assert(Offset >= 0 && SPReg == TRI->getStackRegister());
   return static_cast<unsigned>(Offset);
 }
 
@@ -1721,58 +1720,61 @@ int X86FrameLowering::getFrameIndexReference(const MachineFunction &MF, int FI,
   return Offset + FPDelta;
 }
 
-// Simplified from getFrameIndexReference keeping only StackPointer cases
-int X86FrameLowering::getFrameIndexReferenceFromSP(const MachineFunction &MF,
-                                                   int FI,
-                                                   unsigned &FrameReg) const {
+int
+X86FrameLowering::getFrameIndexReferencePreferSP(const MachineFunction &MF,
+                                                 int FI, unsigned &FrameReg,
+                                                 bool IgnoreSPUpdates) const {
+
   const MachineFrameInfo *MFI = MF.getFrameInfo();
   // Does not include any dynamic realign.
   const uint64_t StackSize = MFI->getStackSize();
-  {
-#ifndef NDEBUG
-    // LLVM arranges the stack as follows:
-    //   ...
-    //   ARG2
-    //   ARG1
-    //   RETADDR
-    //   PUSH RBP   <-- RBP points here
-    //   PUSH CSRs
-    //   ~~~~~~~    <-- possible stack realignment (non-win64)
-    //   ...
-    //   STACK OBJECTS
-    //   ...        <-- RSP after prologue points here
-    //   ~~~~~~~    <-- possible stack realignment (win64)
-    //
-    // if (hasVarSizedObjects()):
-    //   ...        <-- "base pointer" (ESI/RBX) points here
-    //   DYNAMIC ALLOCAS
-    //   ...        <-- RSP points here
-    //
-    // Case 1: In the simple case of no stack realignment and no dynamic
-    // allocas, both "fixed" stack objects (arguments and CSRs) are addressable
-    // with fixed offsets from RSP.
-    //
-    // Case 2: In the case of stack realignment with no dynamic allocas, fixed
-    // stack objects are addressed with RBP and regular stack objects with RSP.
-    //
-    // Case 3: In the case of dynamic allocas and stack realignment, RSP is used
-    // to address stack arguments for outgoing calls and nothing else. The "base
-    // pointer" points to local variables, and RBP points to fixed objects.
-    //
-    // In cases 2 and 3, we can only answer for non-fixed stack objects, and the
-    // answer we give is relative to the SP after the prologue, and not the
-    // SP in the middle of the function.
+  // LLVM arranges the stack as follows:
+  //   ...
+  //   ARG2
+  //   ARG1
+  //   RETADDR
+  //   PUSH RBP   <-- RBP points here
+  //   PUSH CSRs
+  //   ~~~~~~~    <-- possible stack realignment (non-win64)
+  //   ...
+  //   STACK OBJECTS
+  //   ...        <-- RSP after prologue points here
+  //   ~~~~~~~    <-- possible stack realignment (win64)
+  //
+  // if (hasVarSizedObjects()):
+  //   ...        <-- "base pointer" (ESI/RBX) points here
+  //   DYNAMIC ALLOCAS
+  //   ...        <-- RSP points here
+  //
+  // Case 1: In the simple case of no stack realignment and no dynamic
+  // allocas, both "fixed" stack objects (arguments and CSRs) are addressable
+  // with fixed offsets from RSP.
+  //
+  // Case 2: In the case of stack realignment with no dynamic allocas, fixed
+  // stack objects are addressed with RBP and regular stack objects with RSP.
+  //
+  // Case 3: In the case of dynamic allocas and stack realignment, RSP is used
+  // to address stack arguments for outgoing calls and nothing else. The "base
+  // pointer" points to local variables, and RBP points to fixed objects.
+  //
+  // In cases 2 and 3, we can only answer for non-fixed stack objects, and the
+  // answer we give is relative to the SP after the prologue, and not the
+  // SP in the middle of the function.
 
-    assert((!MFI->isFixedObjectIndex(FI) || !TRI->needsStackRealignment(MF) ||
-            STI.isTargetWin64()) &&
-           "offset from fixed object to SP is not static");
+  if (MFI->isFixedObjectIndex(FI) && TRI->needsStackRealignment(MF) &&
+      !STI.isTargetWin64())
+    return getFrameIndexReference(MF, FI, FrameReg);
 
-    // We don't handle tail calls, and shouldn't be seeing them either.
-    int TailCallReturnAddrDelta =
-        MF.getInfo<X86MachineFunctionInfo>()->getTCReturnAddrDelta();
-    assert(!(TailCallReturnAddrDelta < 0) && "we don't handle this case!");
-#endif
-  }
+  // If !hasReservedCallFrame the function might have SP adjustement in the
+  // body.  So, even though the offset is statically known, it depends on where
+  // we are in the function.
+  const TargetFrameLowering *TFI = MF.getSubtarget().getFrameLowering();
+  if (!IgnoreSPUpdates && !TFI->hasReservedCallFrame(MF))
+    return getFrameIndexReference(MF, FI, FrameReg);
+
+  // We don't handle tail calls, and shouldn't be seeing them either.
+  assert(MF.getInfo<X86MachineFunctionInfo>()->getTCReturnAddrDelta() >= 0 &&
+         "we don't handle this case!");
 
   // Fill in FrameReg output argument.
   FrameReg = TRI->getStackRegister();
@@ -2296,6 +2298,28 @@ void X86FrameLowering::adjustForSegmentedStacks(
 #endif
 }
 
+/// Lookup an ERTS parameter in the !hipe.literals named metadata node.
+/// HiPE provides Erlang Runtime System-internal parameters, such as PCB offsets
+/// to fields it needs, through a named metadata node "hipe.literals" containing
+/// name-value pairs.
+static unsigned getHiPELiteral(
+    NamedMDNode *HiPELiteralsMD, const StringRef LiteralName) {
+  for (int i = 0, e = HiPELiteralsMD->getNumOperands(); i != e; ++i) {
+    MDNode *Node = HiPELiteralsMD->getOperand(i);
+    if (Node->getNumOperands() != 2) continue;
+    MDString *NodeName = dyn_cast<MDString>(Node->getOperand(0));
+    ValueAsMetadata *NodeVal = dyn_cast<ValueAsMetadata>(Node->getOperand(1));
+    if (!NodeName || !NodeVal) continue;
+    ConstantInt *ValConst = dyn_cast_or_null<ConstantInt>(NodeVal->getValue());
+    if (ValConst && NodeName->getString() == LiteralName) {
+      return ValConst->getZExtValue();
+    }
+  }
+
+  report_fatal_error("HiPE literal " + LiteralName
+                     + " required but not provided");
+}
+
 /// Erlang programs may need a special prologue to handle the stack size they
 /// might need at runtime. That is because Erlang/OTP does not implement a C
 /// stack but uses a custom implementation of hybrid stack/heap architecture.
@@ -2321,7 +2345,14 @@ void X86FrameLowering::adjustForHiPEPrologue(
   assert(&(*MF.begin()) == &PrologueMBB && "Shrink-wrapping not supported yet");
 
   // HiPE-specific values
-  const unsigned HipeLeafWords = 24;
+  NamedMDNode *HiPELiteralsMD = MF.getMMI().getModule()
+    ->getNamedMetadata("hipe.literals");
+  if (!HiPELiteralsMD)
+    report_fatal_error(
+        "Can't generate HiPE prologue without runtime parameters");
+  const unsigned HipeLeafWords
+    = getHiPELiteral(HiPELiteralsMD,
+                     Is64Bit ? "AMD64_LEAF_WORDS" : "X86_LEAF_WORDS");
   const unsigned CCRegisteredArgs = Is64Bit ? 6 : 5;
   const unsigned Guaranteed = HipeLeafWords * SlotSize;
   unsigned CallerStkArity = MF.getFunction()->arg_size() > CCRegisteredArgs ?
@@ -2393,20 +2424,19 @@ void X86FrameLowering::adjustForHiPEPrologue(
 
     unsigned ScratchReg, SPReg, PReg, SPLimitOffset;
     unsigned LEAop, CMPop, CALLop;
+    SPLimitOffset = getHiPELiteral(HiPELiteralsMD, "P_NSP_LIMIT");
     if (Is64Bit) {
       SPReg = X86::RSP;
       PReg  = X86::RBP;
       LEAop = X86::LEA64r;
       CMPop = X86::CMP64rm;
       CALLop = X86::CALL64pcrel32;
-      SPLimitOffset = 0x90;
     } else {
       SPReg = X86::ESP;
       PReg  = X86::EBP;
       LEAop = X86::LEA32r;
       CMPop = X86::CMP32rm;
       CALLop = X86::CALLpcrel32;
-      SPLimitOffset = 0x4c;
     }
 
     ScratchReg = GetScratchRegister(Is64Bit, IsLP64, MF, true);

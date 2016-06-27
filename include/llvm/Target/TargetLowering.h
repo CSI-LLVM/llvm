@@ -1136,6 +1136,15 @@ public:
     return MaxAtomicSizeInBitsSupported;
   }
 
+  /// Returns the size of the smallest cmpxchg or ll/sc instruction
+  /// the backend supports.  Any smaller operations are widened in
+  /// AtomicExpandPass.
+  ///
+  /// Note that *unlike* operations above the maximum size, atomic ops
+  /// are still natively supported below the minimum; they just
+  /// require a more complex expansion.
+  unsigned getMinCmpXchgSizeInBits() const { return MinCmpXchgSizeInBits; }
+
   /// Whether AtomicExpandPass should automatically insert fences and reduce
   /// ordering for this atomic. This should be true for most architectures with
   /// weak memory ordering. Defaults to false.
@@ -1552,6 +1561,11 @@ protected:
     MaxAtomicSizeInBitsSupported = SizeInBits;
   }
 
+  // Sets the minimum cmpxchg or ll/sc size supported by the backend.
+  void setMinCmpXchgSizeInBits(unsigned SizeInBits) {
+    MinCmpXchgSizeInBits = SizeInBits;
+  }
+
 public:
   //===--------------------------------------------------------------------===//
   // Addressing mode description hooks (used by LSR etc).
@@ -1965,6 +1979,10 @@ private:
   /// Accesses larger than this will be expanded by AtomicExpandPass.
   unsigned MaxAtomicSizeInBitsSupported;
 
+  /// Size in bits of the minimum cmpxchg or ll/sc operation the
+  /// backend supports.
+  unsigned MinCmpXchgSizeInBits;
+
   /// If set to a physical register, this specifies the register that
   /// llvm.savestack/llvm.restorestack should save and restore.
   unsigned StackPointerRegisterToSaveRestore;
@@ -2157,6 +2175,8 @@ class TargetLowering : public TargetLoweringBase {
 public:
   /// NOTE: The TargetMachine owns TLOF.
   explicit TargetLowering(const TargetMachine &TM);
+
+  bool isPositionIndependent() const;
 
   /// Returns true by value, base pointer and offset pointer and addressing mode
   /// by reference if the node's address can be legally represented as
@@ -2515,13 +2535,11 @@ public:
     }
 
     CallLoweringInfo &setCallee(CallingConv::ID CC, Type *ResultType,
-                                SDValue Target, ArgListTy &&ArgsList,
-                                unsigned FixedArgs = -1) {
+                                SDValue Target, ArgListTy &&ArgsList) {
       RetTy = ResultType;
       Callee = Target;
       CallConv = CC;
-      NumFixedArgs =
-        (FixedArgs == static_cast<unsigned>(-1) ? Args.size() : FixedArgs);
+      NumFixedArgs = Args.size();
       Args = std::move(ArgsList);
       return *this;
     }

@@ -1242,8 +1242,9 @@ multiclass avx512_blendmask<bits<8> opc, string OpcodeStr, X86VectorVTInfo _> {
              (ins _.KRCWM:$mask, _.RC:$src1, _.RC:$src2),
              !strconcat(OpcodeStr,
              "\t{$src2, $src1, ${dst} {${mask}}|${dst} {${mask}}, $src1, $src2}"),
-             [(set _.RC:$dst, (X86select _.KRCWM:$mask, (_.VT _.RC:$src1),
-                 (_.VT _.RC:$src2)))]>, EVEX_4V, EVEX_K;
+             [(set _.RC:$dst, (vselect _.KRCWM:$mask, 
+                                (_.VT _.RC:$src2),
+                                (_.VT _.RC:$src1)))]>, EVEX_4V, EVEX_K;
   let hasSideEffects = 0 in
   def rrkz : AVX5128I<opc, MRMSrcReg, (outs _.RC:$dst),
              (ins _.KRCWM:$mask, _.RC:$src1, _.RC:$src2),
@@ -1260,8 +1261,9 @@ multiclass avx512_blendmask<bits<8> opc, string OpcodeStr, X86VectorVTInfo _> {
              (ins _.KRCWM:$mask, _.RC:$src1, _.MemOp:$src2),
              !strconcat(OpcodeStr,
              "\t{$src2, $src1, ${dst} {${mask}}|${dst} {${mask}}, $src1, $src2}"),
-             [(set _.RC:$dst, (X86select _.KRCWM:$mask, (_.VT _.RC:$src1),
-              (_.VT (bitconvert (_.LdFrag addr:$src2)))))]>,
+             [(set _.RC:$dst, (vselect _.KRCWM:$mask,
+                                 (_.VT (bitconvert (_.LdFrag addr:$src2))),
+                                 (_.VT _.RC:$src1)))]>,
               EVEX_4V, EVEX_K, EVEX_CD8<_.EltSize, CD8VF>;
   let mayLoad = 1, hasSideEffects = 0 in
   def rmkz : AVX5128I<opc, MRMSrcMem, (outs _.RC:$dst),
@@ -1278,8 +1280,9 @@ multiclass avx512_blendmask_rmb<bits<8> opc, string OpcodeStr, X86VectorVTInfo _
        !strconcat(OpcodeStr,
             "\t{${src2}", _.BroadcastStr, ", $src1, $dst {${mask}}|",
             "$dst {${mask}}, $src1, ${src2}", _.BroadcastStr, "}"),
-      [(set _.RC:$dst,(X86select _.KRCWM:$mask, (_.VT _.RC:$src1),
-                       (X86VBroadcast (_.ScalarLdFrag addr:$src2))))]>,
+      [(set _.RC:$dst,(vselect _.KRCWM:$mask,
+                        (X86VBroadcast (_.ScalarLdFrag addr:$src2)),
+                        (_.VT _.RC:$src1)))]>,
       EVEX_4V, EVEX_K, EVEX_B, EVEX_CD8<_.EltSize, CD8VF>;
 
   let mayLoad = 1, hasSideEffects = 0 in
@@ -1994,6 +1997,8 @@ let Predicates = [HasDQI] in {
             (EXTRACT_SUBREG (KMOVBrk VK8:$src), sub_8bit)>;
   def : Pat<(i32 (zext (i8 (bitconvert (v8i1 VK8:$src))))),
             (KMOVBrk VK8:$src)>;
+  def : Pat<(i32 (anyext (i8 (bitconvert (v8i1 VK8:$src))))),
+            (KMOVBrk VK8:$src)>;
 }
 let Predicates = [HasAVX512] in {
   def : Pat<(v16i1 (bitconvert (i16 GR16:$src))),
@@ -2001,6 +2006,8 @@ let Predicates = [HasAVX512] in {
   def : Pat<(i16 (bitconvert (v16i1 VK16:$src))),
             (EXTRACT_SUBREG (KMOVWrk VK16:$src), sub_16bit)>;
   def : Pat<(i32 (zext (i16 (bitconvert (v16i1 VK16:$src))))),
+            (KMOVWrk VK16:$src)>;
+  def : Pat<(i32 (anyext (i16 (bitconvert (v16i1 VK16:$src))))),
             (KMOVWrk VK16:$src)>;
 }
 let Predicates = [HasBWI] in {
@@ -2109,9 +2116,17 @@ let Predicates = [HasAVX512] in {
   def : Pat<(i64 (zext VK1:$src)),
             (AND64ri8 (SUBREG_TO_REG (i64 0),
              (KMOVWrk (COPY_TO_REGCLASS VK1:$src, VK16)), sub_32bit), (i64 1))>;
+  def : Pat<(i64 (anyext VK1:$src)),
+            (SUBREG_TO_REG (i64 0),
+             (KMOVWrk (COPY_TO_REGCLASS VK1:$src, VK16)), sub_32bit)>;
+
   def : Pat<(i16 (zext VK1:$src)),
             (EXTRACT_SUBREG
              (AND32ri8 (KMOVWrk (COPY_TO_REGCLASS VK1:$src, VK16)), (i32 1)),
+              sub_16bit)>;
+  def : Pat<(i16 (anyext VK1:$src)),
+            (EXTRACT_SUBREG
+             (KMOVWrk (COPY_TO_REGCLASS VK1:$src, VK16)),
               sub_16bit)>;
 }
 def : Pat<(v16i1 (scalar_to_vector VK1:$src)),
@@ -2142,6 +2157,8 @@ let Predicates = [HasAVX512, NoDQI] in {
               (KMOVWrk (COPY_TO_REGCLASS VK8:$src, VK16)),
               sub_8bit)>;
   def : Pat<(i32 (zext (i8 (bitconvert (v8i1 VK8:$src))))),
+            (KMOVWrk (COPY_TO_REGCLASS VK8:$src, VK16))>;
+  def : Pat<(i32 (anyext (i8 (bitconvert (v8i1 VK8:$src))))),
             (KMOVWrk (COPY_TO_REGCLASS VK8:$src, VK16))>;
 }
 
@@ -4286,9 +4303,14 @@ multiclass avx512_var_shift_w<bits<8> opc, string OpcodeStr,
 defm VPSLLV : avx512_var_shift_types<0x47, "vpsllv", shl>,
               avx512_var_shift_w<0x12, "vpsllvw", shl>,
               avx512_var_shift_w_lowering<avx512vl_i16_info, shl>;
+
 defm VPSRAV : avx512_var_shift_types<0x46, "vpsrav", sra>,
               avx512_var_shift_w<0x11, "vpsravw", sra>,
               avx512_var_shift_w_lowering<avx512vl_i16_info, sra>;
+let isCodeGenOnly = 1 in
+  defm VPSRAV_Int : avx512_var_shift_types<0x46, "vpsrav", X86vsrav>,
+                    avx512_var_shift_w<0x11, "vpsravw", X86vsrav>;
+
 defm VPSRLV : avx512_var_shift_types<0x45, "vpsrlv", srl>,
               avx512_var_shift_w<0x10, "vpsrlvw", srl>,
               avx512_var_shift_w_lowering<avx512vl_i16_info, srl>;

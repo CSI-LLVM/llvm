@@ -116,7 +116,7 @@ protected:
                      const SmallVectorImpl<ISD::OutputArg> &Outs) const;
 
 public:
-  AMDGPUTargetLowering(TargetMachine &TM, const AMDGPUSubtarget &STI);
+  AMDGPUTargetLowering(const TargetMachine &TM, const AMDGPUSubtarget &STI);
 
   bool isFAbsFree(EVT VT) const override;
   bool isFNegFree(EVT VT) const override;
@@ -201,8 +201,9 @@ public:
                                        unsigned Reg, EVT VT) const;
 
   enum ImplicitParameter {
-    GRID_DIM,
-    GRID_OFFSET
+    FIRST_IMPLICIT,
+    GRID_DIM = FIRST_IMPLICIT,
+    GRID_OFFSET,
   };
 
   /// \brief Helper function that returns the byte offset of the given
@@ -218,9 +219,10 @@ enum NodeType : unsigned {
   FIRST_NUMBER = ISD::BUILTIN_OP_END,
   CALL,        // Function call based on a single integer
   UMUL,        // 32bit unsigned multiplication
-  RET_FLAG,
   BRANCH_COND,
   // End AMDIL ISD Opcodes
+  ENDPGM,
+  RETURN,
   DWORDADDR,
   FRACT,
   CLAMP,
@@ -297,6 +299,7 @@ enum NodeType : unsigned {
   INTERP_MOV,
   INTERP_P1,
   INTERP_P2,
+  PC_ADD_REL_OFFSET,
   FIRST_MEM_OPCODE_NUMBER = ISD::FIRST_TARGET_MEMORY_OPCODE,
   STORE_MSKOR,
   LOAD_CONSTANT,

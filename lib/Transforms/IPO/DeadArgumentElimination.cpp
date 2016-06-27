@@ -64,7 +64,8 @@ namespace {
       if (skipModule(M))
         return false;
       DeadArgumentEliminationPass DAEP(ShouldHackArguments());
-      PreservedAnalyses PA = DAEP.run(M);
+      ModuleAnalysisManager DummyMAM;
+      PreservedAnalyses PA = DAEP.run(M, DummyMAM);
       return !PA.areAllPreserved();
     }
 
@@ -118,9 +119,9 @@ bool DeadArgumentEliminationPass::DeleteDeadVarargs(Function &Fn) {
 
   // Okay, we know we can transform this function if safe.  Scan its body
   // looking for calls marked musttail or calls to llvm.vastart.
-  for (Function::iterator BB = Fn.begin(), E = Fn.end(); BB != E; ++BB) {
-    for (BasicBlock::iterator I = BB->begin(), E = BB->end(); I != E; ++I) {
-      CallInst *CI = dyn_cast<CallInst>(I);
+  for (BasicBlock &BB : Fn) {
+    for (Instruction &I : BB) {
+      CallInst *CI = dyn_cast<CallInst>(&I);
       if (!CI)
         continue;
       if (CI->isMustTailCall())
@@ -147,6 +148,7 @@ bool DeadArgumentEliminationPass::DeleteDeadVarargs(Function &Fn) {
   // Create the new function body and insert it into the module...
   Function *NF = Function::Create(NFTy, Fn.getLinkage());
   NF->copyAttributesFrom(&Fn);
+  NF->setComdat(Fn.getComdat());
   Fn.getParent()->getFunctionList().insert(Fn.getIterator(), NF);
   NF->takeName(&Fn);
 
@@ -605,9 +607,8 @@ void DeadArgumentEliminationPass::MarkValue(const RetOrArg &RA, Liveness L,
     {
       // Note any uses of this value, so this return value can be
       // marked live whenever one of the uses becomes live.
-      for (UseVector::const_iterator UI = MaybeLiveUses.begin(),
-           UE = MaybeLiveUses.end(); UI != UE; ++UI)
-        Uses.insert(std::make_pair(*UI, RA));
+      for (const auto &MaybeLiveUse : MaybeLiveUses)
+        Uses.insert(std::make_pair(MaybeLiveUse, RA));
       break;
     }
   }
@@ -813,6 +814,7 @@ bool DeadArgumentEliminationPass::RemoveDeadStuffFromFunction(Function *F) {
   // Create the new function body and insert it into the module...
   Function *NF = Function::Create(NFTy, F->getLinkage());
   NF->copyAttributesFrom(F);
+  NF->setComdat(F->getComdat());
   NF->setAttributes(NewPAL);
   // Insert the new function before the old function, so we won't be processing
   // it again.
@@ -979,8 +981,8 @@ bool DeadArgumentEliminationPass::RemoveDeadStuffFromFunction(Function *F) {
   // If we change the return value of the function we must rewrite any return
   // instructions.  Check this now.
   if (F->getReturnType() != NF->getReturnType())
-    for (Function::iterator BB = NF->begin(), E = NF->end(); BB != E; ++BB)
-      if (ReturnInst *RI = dyn_cast<ReturnInst>(BB->getTerminator())) {
+    for (BasicBlock &BB : *NF)
+      if (ReturnInst *RI = dyn_cast<ReturnInst>(BB.getTerminator())) {
         Value *RetVal;
 
         if (NFTy->getReturnType()->isVoidTy()) {
@@ -1015,7 +1017,7 @@ bool DeadArgumentEliminationPass::RemoveDeadStuffFromFunction(Function *F) {
         // Replace the return instruction with one returning the new return
         // value (possibly 0 if we became void).
         ReturnInst::Create(F->getContext(), RetVal, RI);
-        BB->getInstList().erase(RI);
+        BB.getInstList().erase(RI);
       }
 
   // Patch the pointer to LLVM function in debug info descriptor.
@@ -1027,7 +1029,8 @@ bool DeadArgumentEliminationPass::RemoveDeadStuffFromFunction(Function *F) {
   return true;
 }
 
-PreservedAnalyses DeadArgumentEliminationPass::run(Module &M) {
+PreservedAnalyses DeadArgumentEliminationPass::run(Module &M,
+                                                   ModuleAnalysisManager &) {
   bool Changed = false;
 
   // First pass: Do a simple check to see if any functions can have their "..."

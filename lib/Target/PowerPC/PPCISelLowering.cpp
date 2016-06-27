@@ -23,6 +23,7 @@
 #include "llvm/ADT/Statistic.h"
 #include "llvm/ADT/StringSwitch.h"
 #include "llvm/ADT/Triple.h"
+#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -922,7 +923,6 @@ PPCTargetLowering::PPCTargetLowering(const PPCTargetMachine &TM,
     setPrefLoopAlignment(4);
     break;
   }
-
 
   if (Subtarget.enableMachineScheduler())
     setSchedulingPreference(Sched::Source);
@@ -1962,19 +1962,16 @@ bool PPCTargetLowering::getPreIndexedAddressParts(SDNode *N, SDValue &Base,
 //  LowerOperation implementation
 //===----------------------------------------------------------------------===//
 
-/// GetLabelAccessInfo - Return true if we should reference labels using a
-/// PICBase, set the HiOpFlags and LoOpFlags to the target MO flags.
-static bool GetLabelAccessInfo(const TargetMachine &TM,
-                               const PPCSubtarget &Subtarget,
+/// Return true if we should reference labels using a PICBase, set the HiOpFlags
+/// and LoOpFlags to the target MO flags.
+static void getLabelAccessInfo(bool IsPIC, const PPCSubtarget &Subtarget,
                                unsigned &HiOpFlags, unsigned &LoOpFlags,
                                const GlobalValue *GV = nullptr) {
   HiOpFlags = PPCII::MO_HA;
   LoOpFlags = PPCII::MO_LO;
 
   // Don't use the pic base if not in PIC relocation model.
-  bool isPIC = TM.getRelocationModel() == Reloc::PIC_;
-
-  if (isPIC) {
+  if (IsPIC) {
     HiOpFlags |= PPCII::MO_PIC_FLAG;
     LoOpFlags |= PPCII::MO_PIC_FLAG;
   }
@@ -1990,8 +1987,6 @@ static bool GetLabelAccessInfo(const TargetMachine &TM,
       LoOpFlags |= PPCII::MO_NLP_HIDDEN_FLAG;
     }
   }
-
-  return isPIC;
 }
 
 static SDValue LowerLabelRef(SDValue HiPart, SDValue LoPart, bool isPIC,
@@ -2050,10 +2045,10 @@ SDValue PPCTargetLowering::LowerConstantPool(SDValue Op,
   }
 
   unsigned MOHiFlag, MOLoFlag;
-  bool isPIC =
-      GetLabelAccessInfo(DAG.getTarget(), Subtarget, MOHiFlag, MOLoFlag);
+  bool IsPIC = isPositionIndependent();
+  getLabelAccessInfo(IsPIC, Subtarget, MOHiFlag, MOLoFlag);
 
-  if (isPIC && Subtarget.isSVR4ABI()) {
+  if (IsPIC && Subtarget.isSVR4ABI()) {
     SDValue GA = DAG.getTargetConstantPool(C, PtrVT, CP->getAlignment(),
                                            PPCII::MO_PIC_FLAG);
     return getTOCEntry(DAG, SDLoc(CP), false, GA);
@@ -2063,7 +2058,7 @@ SDValue PPCTargetLowering::LowerConstantPool(SDValue Op,
     DAG.getTargetConstantPool(C, PtrVT, CP->getAlignment(), 0, MOHiFlag);
   SDValue CPILo =
     DAG.getTargetConstantPool(C, PtrVT, CP->getAlignment(), 0, MOLoFlag);
-  return LowerLabelRef(CPIHi, CPILo, isPIC, DAG);
+  return LowerLabelRef(CPIHi, CPILo, IsPIC, DAG);
 }
 
 SDValue PPCTargetLowering::LowerJumpTable(SDValue Op, SelectionDAG &DAG) const {
@@ -2079,10 +2074,10 @@ SDValue PPCTargetLowering::LowerJumpTable(SDValue Op, SelectionDAG &DAG) const {
   }
 
   unsigned MOHiFlag, MOLoFlag;
-  bool isPIC =
-      GetLabelAccessInfo(DAG.getTarget(), Subtarget, MOHiFlag, MOLoFlag);
+  bool IsPIC = isPositionIndependent();
+  getLabelAccessInfo(IsPIC, Subtarget, MOHiFlag, MOLoFlag);
 
-  if (isPIC && Subtarget.isSVR4ABI()) {
+  if (IsPIC && Subtarget.isSVR4ABI()) {
     SDValue GA = DAG.getTargetJumpTable(JT->getIndex(), PtrVT,
                                         PPCII::MO_PIC_FLAG);
     return getTOCEntry(DAG, SDLoc(GA), false, GA);
@@ -2090,7 +2085,7 @@ SDValue PPCTargetLowering::LowerJumpTable(SDValue Op, SelectionDAG &DAG) const {
 
   SDValue JTIHi = DAG.getTargetJumpTable(JT->getIndex(), PtrVT, MOHiFlag);
   SDValue JTILo = DAG.getTargetJumpTable(JT->getIndex(), PtrVT, MOLoFlag);
-  return LowerLabelRef(JTIHi, JTILo, isPIC, DAG);
+  return LowerLabelRef(JTIHi, JTILo, IsPIC, DAG);
 }
 
 SDValue PPCTargetLowering::LowerBlockAddress(SDValue Op,
@@ -2108,11 +2103,11 @@ SDValue PPCTargetLowering::LowerBlockAddress(SDValue Op,
   }
 
   unsigned MOHiFlag, MOLoFlag;
-  bool isPIC =
-      GetLabelAccessInfo(DAG.getTarget(), Subtarget, MOHiFlag, MOLoFlag);
+  bool IsPIC = isPositionIndependent();
+  getLabelAccessInfo(IsPIC, Subtarget, MOHiFlag, MOLoFlag);
   SDValue TgtBAHi = DAG.getTargetBlockAddress(BA, PtrVT, 0, MOHiFlag);
   SDValue TgtBALo = DAG.getTargetBlockAddress(BA, PtrVT, 0, MOLoFlag);
-  return LowerLabelRef(TgtBAHi, TgtBALo, isPIC, DAG);
+  return LowerLabelRef(TgtBAHi, TgtBALo, IsPIC, DAG);
 }
 
 SDValue PPCTargetLowering::LowerGlobalTLSAddress(SDValue Op,
@@ -2172,7 +2167,7 @@ SDValue PPCTargetLowering::LowerGlobalTLSAddress(SDValue Op,
       GOTPtr = DAG.getNode(PPCISD::ADDIS_TLSGD_HA, dl, PtrVT,
                                    GOTReg, TGA);
     } else {
-      if (picLevel == PICLevel::Small)
+      if (picLevel == PICLevel::SmallPIC)
         GOTPtr = DAG.getNode(PPCISD::GlobalBaseReg, dl, PtrVT);
       else
         GOTPtr = DAG.getNode(PPCISD::PPC32_PICGOT, dl, PtrVT);
@@ -2190,7 +2185,7 @@ SDValue PPCTargetLowering::LowerGlobalTLSAddress(SDValue Op,
       GOTPtr = DAG.getNode(PPCISD::ADDIS_TLSLD_HA, dl, PtrVT,
                            GOTReg, TGA);
     } else {
-      if (picLevel == PICLevel::Small)
+      if (picLevel == PICLevel::SmallPIC)
         GOTPtr = DAG.getNode(PPCISD::GlobalBaseReg, dl, PtrVT);
       else
         GOTPtr = DAG.getNode(PPCISD::PPC32_PICGOT, dl, PtrVT);
@@ -2221,10 +2216,10 @@ SDValue PPCTargetLowering::LowerGlobalAddress(SDValue Op,
   }
 
   unsigned MOHiFlag, MOLoFlag;
-  bool isPIC =
-      GetLabelAccessInfo(DAG.getTarget(), Subtarget, MOHiFlag, MOLoFlag, GV);
+  bool IsPIC = isPositionIndependent();
+  getLabelAccessInfo(IsPIC, Subtarget, MOHiFlag, MOLoFlag, GV);
 
-  if (isPIC && Subtarget.isSVR4ABI()) {
+  if (IsPIC && Subtarget.isSVR4ABI()) {
     SDValue GA = DAG.getTargetGlobalAddress(GV, DL, PtrVT,
                                             GSDN->getOffset(),
                                             PPCII::MO_PIC_FLAG);
@@ -2236,7 +2231,7 @@ SDValue PPCTargetLowering::LowerGlobalAddress(SDValue Op,
   SDValue GALo =
     DAG.getTargetGlobalAddress(GV, DL, PtrVT, GSDN->getOffset(), MOLoFlag);
 
-  SDValue Ptr = LowerLabelRef(GAHi, GALo, isPIC, DAG);
+  SDValue Ptr = LowerLabelRef(GAHi, GALo, IsPIC, DAG);
 
   // If the global reference is actually to a non-lazy-pointer, we have to do an
   // extra load to get the address of the global.
@@ -2466,7 +2461,7 @@ SDValue PPCTargetLowering::LowerINIT_TRAMPOLINE(SDValue Op,
   CLI.setDebugLoc(dl).setChain(Chain)
     .setCallee(CallingConv::C, Type::getVoidTy(*DAG.getContext()),
                DAG.getExternalSymbol("__trampoline_setup", PtrVT),
-               std::move(Args), 0);
+               std::move(Args));
 
   std::pair<SDValue, SDValue> CallResult = LowerCallTo(CLI);
   return CallResult.second;
@@ -4280,23 +4275,28 @@ PrepareCall(SelectionDAG &DAG, SDValue &Callee, SDValue &InFlag, SDValue &Chain,
       needIndirectCall = false;
     }
 
+  // PC-relative references to external symbols should go through $stub, unless
+  // we're building with the leopard linker or later, which automatically
+  // synthesizes these stubs.
+  Reloc::Model RM = DAG.getTarget().getRelocationModel();
+  const Triple &TargetTriple = Subtarget.getTargetTriple();
+  bool OldMachOLinker =
+      TargetTriple.isMacOSX() && TargetTriple.isMacOSXVersionLT(10, 5);
+  const Module *Mod = DAG.getMachineFunction().getFunction()->getParent();
+  const GlobalValue *GV = nullptr;
+  if (auto *G = dyn_cast<GlobalAddressSDNode>(Callee))
+    GV = G->getGlobal();
+  bool Local = shouldAssumeDSOLocal(RM, TargetTriple, *Mod, GV);
+  bool UsePlt =
+      !Local && (OldMachOLinker || (Subtarget.isTargetELF() && !isPPC64));
+
   if (isFunctionGlobalAddress(Callee)) {
     GlobalAddressSDNode *G = cast<GlobalAddressSDNode>(Callee);
     // A call to a TLS address is actually an indirect call to a
     // thread-specific pointer.
     unsigned OpFlags = 0;
-    if ((DAG.getTarget().getRelocationModel() != Reloc::Static &&
-         (Subtarget.getTargetTriple().isMacOSX() &&
-          Subtarget.getTargetTriple().isMacOSXVersionLT(10, 5)) &&
-         !G->getGlobal()->isStrongDefinitionForLinker()) ||
-        (Subtarget.isTargetELF() && !isPPC64 &&
-         !G->getGlobal()->hasLocalLinkage() &&
-         DAG.getTarget().getRelocationModel() == Reloc::PIC_)) {
-      // PC-relative references to external symbols should go through $stub,
-      // unless we're building with the leopard linker or later, which
-      // automatically synthesizes these stubs.
+    if (UsePlt)
       OpFlags = PPCII::MO_PLT_OR_STUB;
-    }
 
     // If the callee is a GlobalAddress/ExternalSymbol node (quite common,
     // every direct call is) turn it into a TargetGlobalAddress /
@@ -4309,16 +4309,8 @@ PrepareCall(SelectionDAG &DAG, SDValue &Callee, SDValue &InFlag, SDValue &Chain,
   if (ExternalSymbolSDNode *S = dyn_cast<ExternalSymbolSDNode>(Callee)) {
     unsigned char OpFlags = 0;
 
-    if ((DAG.getTarget().getRelocationModel() != Reloc::Static &&
-         (Subtarget.getTargetTriple().isMacOSX() &&
-          Subtarget.getTargetTriple().isMacOSXVersionLT(10, 5))) ||
-        (Subtarget.isTargetELF() && !isPPC64 &&
-         DAG.getTarget().getRelocationModel() == Reloc::PIC_)) {
-      // PC-relative references to external symbols should go through $stub,
-      // unless we're building with the leopard linker or later, which
-      // automatically synthesizes these stubs.
+    if (UsePlt)
       OpFlags = PPCII::MO_PLT_OR_STUB;
-    }
 
     Callee = DAG.getTargetExternalSymbol(S->getSymbol(), Callee.getValueType(),
                                          OpFlags);
@@ -4746,7 +4738,7 @@ SDValue PPCTargetLowering::LowerCall_32SVR4(
     CCInfo.AnalyzeCallOperands(Outs, CC_PPC32_SVR4);
   }
   CCInfo.clearWasPPCF128();
-  
+
   // Assign locations to all of the outgoing aggregate by value arguments.
   SmallVector<CCValAssign, 16> ByValArgLocs;
   CCState CCByValInfo(CallConv, isVarArg, DAG.getMachineFunction(),
@@ -7050,12 +7042,12 @@ SDValue PPCTargetLowering::LowerBUILD_VECTOR(SDValue Op,
       Constant *NegOne =
         ConstantFP::get(Type::getFloatTy(*DAG.getContext()), -1.0);
 
-      SmallVector<Constant*, 4> CV(4, NegOne);
+      Constant *CV[4];
       for (unsigned i = 0; i < 4; ++i) {
         if (BVN->getOperand(i).isUndef())
           CV[i] = UndefValue::get(Type::getFloatTy(*DAG.getContext()));
         else if (isNullConstant(BVN->getOperand(i)))
-          continue;
+          CV[i] = NegOne;
         else
           CV[i] = One;
       }
@@ -7064,15 +7056,8 @@ SDValue PPCTargetLowering::LowerBUILD_VECTOR(SDValue Op,
       SDValue CPIdx = DAG.getConstantPool(CP, getPointerTy(DAG.getDataLayout()),
                                           16 /* alignment */);
 
-      SmallVector<SDValue, 2> Ops;
-      Ops.push_back(DAG.getEntryNode());
-      Ops.push_back(CPIdx);
-
-      SmallVector<EVT, 2> ValueVTs;
-      ValueVTs.push_back(MVT::v4i1);
-      ValueVTs.push_back(MVT::Other); // chain
-      SDVTList VTs = DAG.getVTList(ValueVTs);
-
+      SDValue Ops[] = {DAG.getEntryNode(), CPIdx};
+      SDVTList VTs = DAG.getVTList({MVT::v4i1, /*chain*/ MVT::Other});
       return DAG.getMemIntrinsicNode(
           PPCISD::QVLFSb, dl, VTs, Ops, MVT::v4f32,
           MachinePointerInfo::getConstantPool(DAG.getMachineFunction()));
@@ -7115,15 +7100,10 @@ SDValue PPCTargetLowering::LowerBUILD_VECTOR(SDValue Op,
     // is typed as v4f64 because the QPX register integer states are not
     // explicitly represented.
 
-    SmallVector<SDValue, 2> Ops;
-    Ops.push_back(StoreChain);
-    Ops.push_back(DAG.getConstant(Intrinsic::ppc_qpx_qvlfiwz, dl, MVT::i32));
-    Ops.push_back(FIdx);
-
-    SmallVector<EVT, 2> ValueVTs;
-    ValueVTs.push_back(MVT::v4f64);
-    ValueVTs.push_back(MVT::Other); // chain
-    SDVTList VTs = DAG.getVTList(ValueVTs);
+    SDValue Ops[] = {StoreChain,
+                     DAG.getConstant(Intrinsic::ppc_qpx_qvlfiwz, dl, MVT::i32),
+                     FIdx};
+    SDVTList VTs = DAG.getVTList({MVT::v4f64, /*chain*/ MVT::Other});
 
     SDValue LoadedVect = DAG.getMemIntrinsicNode(ISD::INTRINSIC_W_CHAIN,
       dl, VTs, Ops, MVT::v4i32, PtrInfo);
@@ -7836,15 +7816,10 @@ SDValue PPCTargetLowering::LowerEXTRACT_VECTOR_ELT(SDValue Op,
   SDValue FIdx = DAG.getFrameIndex(FrameIdx, PtrVT);
 
   SDValue StoreChain = DAG.getEntryNode();
-  SmallVector<SDValue, 2> Ops;
-  Ops.push_back(StoreChain);
-  Ops.push_back(DAG.getConstant(Intrinsic::ppc_qpx_qvstfiw, dl, MVT::i32));
-  Ops.push_back(Value);
-  Ops.push_back(FIdx);
-
-  SmallVector<EVT, 2> ValueVTs;
-  ValueVTs.push_back(MVT::Other); // chain
-  SDVTList VTs = DAG.getVTList(ValueVTs);
+  SDValue Ops[] = {StoreChain,
+                   DAG.getConstant(Intrinsic::ppc_qpx_qvstfiw, dl, MVT::i32),
+                   Value, FIdx};
+  SDVTList VTs = DAG.getVTList(/*chain*/ MVT::Other);
 
   StoreChain = DAG.getMemIntrinsicNode(ISD::INTRINSIC_VOID,
     dl, VTs, Ops, MVT::v4i32, PtrInfo);
@@ -7885,7 +7860,7 @@ SDValue PPCTargetLowering::LowerVectorLoad(SDValue Op,
         ScalarMemVT = MemVT.getScalarType();
     unsigned Stride = ScalarMemVT.getStoreSize();
 
-    SmallVector<SDValue, 8> Vals, LoadChains;
+    SDValue Vals[4], LoadChains[4];
     for (unsigned Idx = 0; Idx < 4; ++Idx) {
       SDValue Load;
       if (ScalarVT != ScalarMemVT)
@@ -7911,8 +7886,8 @@ SDValue PPCTargetLowering::LowerVectorLoad(SDValue Op,
                                   LN->getAddressingMode());
       }
 
-      Vals.push_back(Load);
-      LoadChains.push_back(Load.getValue(1));
+      Vals[Idx] = Load;
+      LoadChains[Idx] = Load.getValue(1);
 
       BasePtr = DAG.getNode(ISD::ADD, dl, BasePtr.getValueType(), BasePtr,
                             DAG.getConstant(Stride, dl,
@@ -7937,19 +7912,17 @@ SDValue PPCTargetLowering::LowerVectorLoad(SDValue Op,
   // To lower v4i1 from a byte array, we load the byte elements of the
   // vector and then reuse the BUILD_VECTOR logic.
 
-  SmallVector<SDValue, 4> VectElmts, VectElmtChains;
+  SDValue VectElmts[4], VectElmtChains[4];
   for (unsigned i = 0; i < 4; ++i) {
     SDValue Idx = DAG.getConstant(i, dl, BasePtr.getValueType());
     Idx = DAG.getNode(ISD::ADD, dl, BasePtr.getValueType(), BasePtr, Idx);
 
-    VectElmts.push_back(DAG.getExtLoad(ISD::EXTLOAD,
-                        dl, MVT::i32, LoadChain, Idx,
-                        LN->getPointerInfo().getWithOffset(i),
-                        MVT::i8 /* memory type */,
-                        LN->isVolatile(), LN->isNonTemporal(),
-                        LN->isInvariant(),
-                        1 /* alignment */, LN->getAAInfo()));
-    VectElmtChains.push_back(VectElmts[i].getValue(1));
+    VectElmts[i] = DAG.getExtLoad(ISD::EXTLOAD, dl, MVT::i32, LoadChain, Idx,
+                                  LN->getPointerInfo().getWithOffset(i),
+                                  MVT::i8 /* memory type */, LN->isVolatile(),
+                                  LN->isNonTemporal(), LN->isInvariant(),
+                                  1 /* alignment */, LN->getAAInfo());
+    VectElmtChains[i] = VectElmts[i].getValue(1);
   }
 
   LoadChain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, VectElmtChains);
@@ -7981,7 +7954,7 @@ SDValue PPCTargetLowering::LowerVectorStore(SDValue Op,
         ScalarMemVT = MemVT.getScalarType();
     unsigned Stride = ScalarMemVT.getStoreSize();
 
-    SmallVector<SDValue, 8> Stores;
+    SDValue Stores[4];
     for (unsigned Idx = 0; Idx < 4; ++Idx) {
       SDValue Ex = DAG.getNode(
           ISD::EXTRACT_VECTOR_ELT, dl, ScalarVT, Value,
@@ -8010,7 +7983,7 @@ SDValue PPCTargetLowering::LowerVectorStore(SDValue Op,
       BasePtr = DAG.getNode(ISD::ADD, dl, BasePtr.getValueType(), BasePtr,
                             DAG.getConstant(Stride, dl,
                                             BasePtr.getValueType()));
-      Stores.push_back(Store);
+      Stores[Idx] = Store;
     }
 
     SDValue TF =  DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Stores);
@@ -8049,43 +8022,38 @@ SDValue PPCTargetLowering::LowerVectorStore(SDValue Op,
   EVT PtrVT = getPointerTy(DAG.getDataLayout());
   SDValue FIdx = DAG.getFrameIndex(FrameIdx, PtrVT);
 
-  SmallVector<SDValue, 2> Ops;
-  Ops.push_back(StoreChain);
-  Ops.push_back(DAG.getConstant(Intrinsic::ppc_qpx_qvstfiw, dl, MVT::i32));
-  Ops.push_back(Value);
-  Ops.push_back(FIdx);
-
-  SmallVector<EVT, 2> ValueVTs;
-  ValueVTs.push_back(MVT::Other); // chain
-  SDVTList VTs = DAG.getVTList(ValueVTs);
+  SDValue Ops[] = {StoreChain,
+                   DAG.getConstant(Intrinsic::ppc_qpx_qvstfiw, dl, MVT::i32),
+                   Value, FIdx};
+  SDVTList VTs = DAG.getVTList(/*chain*/ MVT::Other);
 
   StoreChain = DAG.getMemIntrinsicNode(ISD::INTRINSIC_VOID,
     dl, VTs, Ops, MVT::v4i32, PtrInfo);
 
   // Move data into the byte array.
-  SmallVector<SDValue, 4> Loads, LoadChains;
+  SDValue Loads[4], LoadChains[4];
   for (unsigned i = 0; i < 4; ++i) {
     unsigned Offset = 4*i;
     SDValue Idx = DAG.getConstant(Offset, dl, FIdx.getValueType());
     Idx = DAG.getNode(ISD::ADD, dl, FIdx.getValueType(), FIdx, Idx);
 
-    Loads.push_back(DAG.getLoad(MVT::i32, dl, StoreChain, Idx,
-                                   PtrInfo.getWithOffset(Offset),
-                                   false, false, false, 0));
-    LoadChains.push_back(Loads[i].getValue(1));
+    Loads[i] =
+        DAG.getLoad(MVT::i32, dl, StoreChain, Idx,
+                    PtrInfo.getWithOffset(Offset), false, false, false, 0);
+    LoadChains[i] = Loads[i].getValue(1);
   }
 
   StoreChain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, LoadChains);
 
-  SmallVector<SDValue, 4> Stores;
+  SDValue Stores[4];
   for (unsigned i = 0; i < 4; ++i) {
     SDValue Idx = DAG.getConstant(i, dl, BasePtr.getValueType());
     Idx = DAG.getNode(ISD::ADD, dl, BasePtr.getValueType(), BasePtr, Idx);
 
-    Stores.push_back(DAG.getTruncStore(
+    Stores[i] = DAG.getTruncStore(
         StoreChain, dl, Loads[i], Idx, SN->getPointerInfo().getWithOffset(i),
         MVT::i8 /* memory type */, SN->isNonTemporal(), SN->isVolatile(),
-        1 /* alignment */, SN->getAAInfo()));
+        1 /* alignment */, SN->getAAInfo());
   }
 
   StoreChain = DAG.getNode(ISD::TokenFactor, dl, MVT::Other, Stores);
@@ -9872,7 +9840,7 @@ SDValue PPCTargetLowering::DAGCombineTruncBoolExt(SDNode *N,
 
   std::list<HandleSDNode> PromOpHandles;
   for (auto &PromOp : PromOps)
-    PromOpHandles.emplace_back(PromOp); 
+    PromOpHandles.emplace_back(PromOp);
 
   // Replace all operations (these are all the same, but have a different
   // (i1) return type). DAG.getNode will validate that the types of
@@ -10126,7 +10094,7 @@ SDValue PPCTargetLowering::DAGCombineExtBoolTrunc(SDNode *N,
 
   std::list<HandleSDNode> PromOpHandles;
   for (auto &PromOp : PromOps)
-    PromOpHandles.emplace_back(PromOp); 
+    PromOpHandles.emplace_back(PromOp);
 
   // Replace all operations (these are all the same, but have a different
   // (promoted) return type). DAG.getNode will validate that the types of
@@ -10579,7 +10547,7 @@ SDValue PPCTargetLowering::PerformDAGCombine(SDNode *N,
       if (Bitcast->getOpcode() != ISD::BITCAST ||
           Bitcast->getValueType(0) != MVT::f32)
         return false;
-      if (Bitcast2->getOpcode() != ISD::BITCAST ||          
+      if (Bitcast2->getOpcode() != ISD::BITCAST ||
           Bitcast2->getValueType(0) != MVT::f32)
         return false;
 
@@ -10612,8 +10580,8 @@ SDValue PPCTargetLowering::PerformDAGCombine(SDNode *N,
                     MinAlign(LD->getAlignment(), 4), LD->getAAInfo());
 
       if (LD->isIndexed()) {
-	// Note that DAGCombine should re-form any pre-increment load(s) from
-	// what is produced here if that makes sense.
+        // Note that DAGCombine should re-form any pre-increment load(s) from
+        // what is produced here if that makes sense.
         DAG.ReplaceAllUsesOfValueWith(SDValue(LD, 1), BasePtr);
       }
 

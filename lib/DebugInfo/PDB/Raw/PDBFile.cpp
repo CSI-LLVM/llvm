@@ -23,6 +23,7 @@
 #include "llvm/DebugInfo/PDB/Raw/SymbolStream.h"
 #include "llvm/DebugInfo/PDB/Raw/TpiStream.h"
 #include "llvm/Support/Endian.h"
+#include "llvm/Support/FileOutputBuffer.h"
 #include "llvm/Support/MemoryBuffer.h"
 
 using namespace llvm;
@@ -68,6 +69,8 @@ ArrayRef<support::ulittle32_t>
 PDBFile::getStreamBlockList(uint32_t StreamIndex) const {
   return StreamMap[StreamIndex];
 }
+
+size_t PDBFile::getFileSize() const { return Buffer->getLength(); }
 
 ArrayRef<uint8_t> PDBFile::getBlockData(uint32_t BlockIndex,
                                         uint32_t NumBytes) const {
@@ -168,8 +171,10 @@ Error PDBFile::parseStreamData() {
   if (auto EC = Reader.readArray(StreamSizes, NumStreams))
     return EC;
   for (uint32_t I = 0; I < NumStreams; ++I) {
+    uint32_t StreamSize = getStreamByteSize(I);
+    // FIXME: What does StreamSize ~0U mean?
     uint64_t NumExpectedStreamBlocks =
-        bytesToBlocks(getStreamByteSize(I), SB->BlockSize);
+        StreamSize == UINT32_MAX ? 0 : bytesToBlocks(StreamSize, SB->BlockSize);
 
     // For convenience, we store the block array contiguously.  This is because
     // if someone calls setStreamMap(), it is more convenient to be able to call
@@ -317,3 +322,15 @@ Expected<NameHashTable &> PDBFile::getStringTable() {
   }
   return *StringTable;
 }
+
+void PDBFile::setSuperBlock(const SuperBlock *Block) { SB = Block; }
+
+void PDBFile::setStreamSizes(ArrayRef<support::ulittle32_t> Sizes) {
+  StreamSizes = Sizes;
+}
+
+void PDBFile::setStreamMap(ArrayRef<ArrayRef<support::ulittle32_t>> Blocks) {
+  StreamMap = Blocks;
+}
+
+void PDBFile::commit() {}

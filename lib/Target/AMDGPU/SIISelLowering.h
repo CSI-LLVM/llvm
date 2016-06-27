@@ -21,9 +21,12 @@
 namespace llvm {
 
 class SITargetLowering final : public AMDGPUTargetLowering {
-  SDValue LowerParameter(SelectionDAG &DAG, EVT VT, EVT MemVT, const SDLoc &DL,
+  SDValue LowerParameterPtr(SelectionDAG &DAG, const SDLoc &SL, SDValue Chain,
+                            unsigned Offset) const;
+  SDValue LowerParameter(SelectionDAG &DAG, EVT VT, EVT MemVT, const SDLoc &SL,
                          SDValue Chain, unsigned Offset, bool Signed) const;
-
+  SDValue LowerGlobalAddress(AMDGPUMachineFunction *MFI, SDValue Op,
+                             SelectionDAG &DAG) const override;
   SDValue lowerImplicitZextParam(SelectionDAG &DAG, SDValue Op,
                                  MVT VT, unsigned Offset) const;
 
@@ -45,6 +48,7 @@ class SITargetLowering final : public AMDGPUTargetLowering {
 
   SDValue getSegmentAperture(unsigned AS, SelectionDAG &DAG) const;
   SDValue lowerADDRSPACECAST(SDValue Op, SelectionDAG &DAG) const;
+  SDValue lowerTRAP(SDValue Op, SelectionDAG &DAG) const;
 
   void adjustWritemask(MachineSDNode *&N, SelectionDAG &DAG) const;
 
@@ -66,8 +70,12 @@ class SITargetLowering final : public AMDGPUTargetLowering {
   bool isLegalMUBUFAddressingMode(const AddrMode &AM) const;
 
   bool isCFIntrinsic(const SDNode *Intr) const;
+
+  void createDebuggerPrologueStackObjects(MachineFunction &MF) const;
 public:
-  SITargetLowering(TargetMachine &tm, const AMDGPUSubtarget &STI);
+  SITargetLowering(const TargetMachine &tm, const SISubtarget &STI);
+
+  const SISubtarget *getSubtarget() const;
 
   bool getTgtMemIntrinsic(IntrinsicInfo &, const CallInst &,
                           unsigned IntrinsicID) const override;
@@ -98,6 +106,8 @@ public:
                                         Type *Ty) const override;
 
   bool isTypeDesirableForOp(unsigned Op, EVT VT) const override;
+
+  bool isOffsetFoldingLegal(const GlobalAddressSDNode *GA) const override;
 
   SDValue LowerFormalArguments(SDValue Chain, CallingConv::ID CallConv,
                                bool isVarArg,
