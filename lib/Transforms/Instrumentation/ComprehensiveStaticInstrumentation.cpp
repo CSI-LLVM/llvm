@@ -341,7 +341,7 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
       GV = new GlobalVariable(M, FileStrConstant->getType(),
               true, GlobalValue::PrivateLinkage,
               FileStrConstant, "__csi_unit_filename", nullptr, GlobalVariable::NotThreadLocal, 0);
-      GV->setUnnamedAddr(true);
+      GV->setUnnamedAddr(GlobalValue::UnnamedAddr::Global);
     }
     assert(GV);
     Constant *File =
