@@ -245,6 +245,13 @@ static cl::opt<bool>
                                          " variables"),
                                 cl::Hidden, cl::init(false));
 
+static cl::opt<bool>
+    ClUseMachOGlobalsSection("asan-globals-live-support",
+                             cl::desc("Use linker features to support dead "
+                                      "code stripping of globals "
+                                      "(Mach-O only)"),
+                             cl::Hidden, cl::init(false));
+
 // Debug flags.
 static cl::opt<int> ClDebug("asan-debug", cl::desc("debug"), cl::Hidden,
                             cl::init(0));
@@ -454,18 +461,19 @@ struct AddressSanitizer : public FunctionPass {
     AU.addRequired<TargetLibraryInfoWrapperPass>();
   }
   uint64_t getAllocaSizeInBytes(AllocaInst *AI) const {
+    uint64_t ArraySize = 1;
+    if (AI->isArrayAllocation()) {
+      ConstantInt *CI = dyn_cast<ConstantInt>(AI->getArraySize());
+      assert(CI && "non-constant array size");
+      ArraySize = CI->getZExtValue();
+    }
     Type *Ty = AI->getAllocatedType();
     uint64_t SizeInBytes =
         AI->getModule()->getDataLayout().getTypeAllocSize(Ty);
-    return SizeInBytes;
+    return SizeInBytes * ArraySize;
   }
   /// Check if we want (and can) handle this alloca.
   bool isInterestingAlloca(AllocaInst &AI);
-
-  // Check if we have dynamic alloca.
-  bool isDynamicAlloca(AllocaInst &AI) const {
-    return AI.isArrayAllocation() || !AI.isStaticAlloca();
-  }
 
   /// If it is an interesting memory access, return the PointerOperand
   /// and set IsWrite/Alignment. Otherwise return nullptr.
@@ -721,7 +729,7 @@ struct FunctionStackPoisoner : public InstVisitor<FunctionStackPoisoner> {
     }
 
     StackAlignment = std::max(StackAlignment, AI.getAlignment());
-    if (ASan.isDynamicAlloca(AI))
+    if (!AI.isStaticAlloca())
       DynamicAllocaVec.push_back(&AI);
     else
       AllocaVec.push_back(&AI);
@@ -912,7 +920,7 @@ bool AddressSanitizer::isInterestingAlloca(AllocaInst &AI) {
   bool IsInteresting =
       (AI.getAllocatedType()->isSized() &&
        // alloca() may be called with 0 size, ignore it.
-       getAllocaSizeInBytes(&AI) > 0 &&
+       ((!AI.isStaticAlloca()) || getAllocaSizeInBytes(&AI) > 0) &&
        // We are only interested in allocas not promotable to registers.
        // Promotable allocas are common under -O0.
        (!ClSkipPromotableAllocas || !isAllocaPromotable(&AI)) &&
@@ -1337,6 +1345,9 @@ bool AddressSanitizerModule::ShouldInstrumentGlobal(GlobalVariable *G) {
 // binary in order to allow the linker to properly dead strip. This is only
 // supported on recent versions of ld64.
 bool AddressSanitizerModule::ShouldUseMachOGlobalsSection() const {
+  if (!ClUseMachOGlobalsSection)
+    return false;
+
   if (!TargetTriple.isOSBinFormatMachO())
     return false;
 
@@ -2013,7 +2024,7 @@ void FunctionStackPoisoner::poisonStack() {
     assert(APC.InsBefore);
     assert(APC.AI);
     assert(ASan.isInterestingAlloca(*APC.AI));
-    bool IsDynamicAlloca = ASan.isDynamicAlloca(*APC.AI);
+    bool IsDynamicAlloca = !(*APC.AI).isStaticAlloca();
     if (!ClInstrumentAllocas && IsDynamicAlloca)
       continue;
 

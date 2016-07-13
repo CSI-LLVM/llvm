@@ -94,6 +94,27 @@ entry:
   ret void
 }
 
+; CHECK-LABEL: {{^}}extract_undef_offset_sgpr:
+define void @extract_undef_offset_sgpr(i32 addrspace(1)* %out, <4 x i32> addrspace(1)* %in) {
+entry:
+  %ld = load volatile <4 x i32>, <4  x i32> addrspace(1)* %in
+  %value = extractelement <4 x i32> %ld, i32 undef
+  store i32 %value, i32 addrspace(1)* %out
+  ret void
+}
+
+; CHECK-LABEL: {{^}}insert_undef_offset_sgpr_vector_src:
+; CHECK: buffer_load_dwordx4
+; CHECK: s_mov_b32 m0,
+; CHECK-NEXT: v_movreld_b32
+define void @insert_undef_offset_sgpr_vector_src(<4 x i32> addrspace(1)* %out, <4 x i32> addrspace(1)* %in) {
+entry:
+  %ld = load <4 x i32>, <4  x i32> addrspace(1)* %in
+  %value = insertelement <4 x i32> %ld, i32 5, i32 undef
+  store <4 x i32> %value, <4 x i32> addrspace(1)* %out
+  ret void
+}
+
 ; CHECK-LABEL: {{^}}insert_w_offset:
 ; CHECK: s_mov_b32 m0
 ; CHECK-NEXT: v_movreld_b32_e32
@@ -397,6 +418,70 @@ bb:
   %tmp8 = extractelement <6 x i32> %tmp7, i32 5
   store volatile i32 %tmp6, i32 addrspace(3)* undef, align 4
   store volatile i32 %tmp8, i32 addrspace(3)* undef, align 4
+  ret void
+}
+
+; offset puts outside of superegister bounaries, so clamp to 1st element.
+; CHECK-LABEL: {{^}}extract_largest_inbounds_offset:
+; CHECK: buffer_load_dwordx4 v{{\[}}[[LO_ELT:[0-9]+]]:[[HI_ELT:[0-9]+]]{{\]}}
+; CHECK: s_load_dword [[IDX:s[0-9]+]]
+; CHECK: s_mov_b32 m0, [[IDX]]
+; CHECK-NEXT: v_movrels_b32_e32 [[EXTRACT:v[0-9]+]], v[[HI_ELT]]
+; CHECK: buffer_store_dword [[EXTRACT]]
+define void @extract_largest_inbounds_offset(i32 addrspace(1)* %out, <4 x i32> addrspace(1)* %in, i32 %idx) {
+entry:
+  %ld = load volatile <4 x i32>, <4  x i32> addrspace(1)* %in
+  %offset = add i32 %idx, 3
+  %value = extractelement <4 x i32> %ld, i32 %offset
+  store i32 %value, i32 addrspace(1)* %out
+  ret void
+}
+
+; CHECK-LABL: {{^}}extract_out_of_bounds_offset:
+; CHECK: buffer_load_dwordx4 v{{\[}}[[LO_ELT:[0-9]+]]:[[HI_ELT:[0-9]+]]{{\]}}
+; CHECK: s_load_dword [[IDX:s[0-9]+]]
+; CHECK: s_add_i32 m0, [[IDX]], 4
+; CHECK-NEXT: v_movrels_b32_e32 [[EXTRACT:v[0-9]+]], v[[LO_ELT]]
+; CHECK: buffer_store_dword [[EXTRACT]]
+define void @extract_out_of_bounds_offset(i32 addrspace(1)* %out, <4 x i32> addrspace(1)* %in, i32 %idx) {
+entry:
+  %ld = load volatile <4 x i32>, <4  x i32> addrspace(1)* %in
+  %offset = add i32 %idx, 4
+  %value = extractelement <4 x i32> %ld, i32 %offset
+  store i32 %value, i32 addrspace(1)* %out
+  ret void
+}
+
+; Test that the or is folded into the base address register instead of
+; added to m0
+
+; GCN-LABEL: {{^}}extractelement_v4i32_or_index:
+; GCN: s_load_dword [[IDX_IN:s[0-9]+]]
+; GCN: s_lshl_b32 [[IDX_SHL:s[0-9]+]], [[IDX_IN]]
+; GCN-NOT: [[IDX_SHL]]
+; GCN: s_mov_b32 m0, [[IDX_SHL]]
+; GCN: v_movreld_b32_e32 v{{[0-9]+}}, v{{[0-9]+}}
+define void @extractelement_v4i32_or_index(i32 addrspace(1)* %out, <4 x i32> addrspace(1)* %in, i32 %idx.in) {
+entry:
+  %ld = load volatile <4 x i32>, <4  x i32> addrspace(1)* %in
+  %idx.shl = shl i32 %idx.in, 2
+  %idx = or i32 %idx.shl, 1
+  %value = extractelement <4 x i32> %ld, i32 %idx
+  store i32 %value, i32 addrspace(1)* %out
+  ret void
+}
+
+; GCN-LABEL: {{^}}insertelement_v4f32_or_index:
+; GCN: s_load_dword [[IDX_IN:s[0-9]+]]
+; GCN: s_lshl_b32 [[IDX_SHL:s[0-9]+]], [[IDX_IN]]
+; GCN-NOT: [[IDX_SHL]]
+; GCN: s_mov_b32 m0, [[IDX_SHL]]
+; GCN: v_movreld_b32_e32 v{{[0-9]+}}, v{{[0-9]+}}
+define void @insertelement_v4f32_or_index(<4 x float> addrspace(1)* %out, <4 x float> %a, i32 %idx.in) nounwind {
+  %idx.shl = shl i32 %idx.in, 2
+  %idx = or i32 %idx.shl, 1
+  %vecins = insertelement <4 x float> %a, float 5.000000e+00, i32 %idx
+  store <4 x float> %vecins, <4 x float> addrspace(1)* %out, align 16
   ret void
 }
 

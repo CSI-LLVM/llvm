@@ -594,7 +594,7 @@ protected:
 
 private:
   class CachingWalker;
-
+  void buildMemorySSA();
   void verifyUseInDefs(MemoryAccess *, MemoryAccess *) const;
   using AccessMap = DenseMap<const BasicBlock *, std::unique_ptr<AccessList>>;
 
@@ -624,6 +624,17 @@ private:
   // Memory SSA building info
   std::unique_ptr<CachingWalker> Walker;
   unsigned NextID;
+};
+
+// This pass does eager building and then printing of MemorySSA. It is used by
+// the tests to be able to build, dump, and verify Memory SSA.
+class MemorySSAPrinterLegacyPass : public FunctionPass {
+public:
+  MemorySSAPrinterLegacyPass();
+
+  static char ID;
+  bool runOnFunction(Function &) override;
+  void getAnalysisUsage(AnalysisUsage &AU) const override;
 };
 
 /// An analysis that produces \c MemorySSA for a function.

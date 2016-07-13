@@ -880,8 +880,7 @@ def FarData      : Predicate<"TM.getCodeModel() != CodeModel::Small &&"
                              "TM.getCodeModel() != CodeModel::Kernel">;
 def NearData     : Predicate<"TM.getCodeModel() == CodeModel::Small ||"
                              "TM.getCodeModel() == CodeModel::Kernel">;
-def IsStatic     : Predicate<"TM.getRelocationModel() == Reloc::Static">;
-def IsNotPIC     : Predicate<"TM.getRelocationModel() != Reloc::PIC_">;
+def IsNotPIC     : Predicate<"!TM.isPositionIndependent()">;
 def OptForSize   : Predicate<"OptForSize">;
 def OptForMinSize : Predicate<"OptForMinSize">;
 def OptForSpeed  : Predicate<"!OptForSize">;
@@ -2515,7 +2514,7 @@ let Predicates = [HasTBM] in {
 //
 
 def CLFLUSHOPT : I<0xAE, MRM7m, (outs), (ins i8mem:$src),
-                   "clflushopt\t$src", []>, PD;
+                   "clflushopt\t$src", [(int_x86_clflushopt addr:$src)]>, PD;
 def CLWB       : I<0xAE, MRM6m, (outs), (ins i8mem:$src), "clwb\t$src", []>, PD;
 def PCOMMIT    : I<0xAE, MRM_F8, (outs), (ins), "pcommit", []>, PD;
 

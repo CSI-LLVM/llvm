@@ -17,7 +17,6 @@
 #include "HexagonSubtarget.h"
 #include "HexagonTargetMachine.h"
 #include "HexagonTargetObjectFile.h"
-#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -1503,8 +1502,7 @@ HexagonTargetLowering::LowerGLOBALADDRESS(SDValue Op, SelectionDAG &DAG) const {
     return DAG.getNode(HexagonISD::CONST32, dl, PtrVT, GA);
   }
 
-  const Triple &TargetTriple = HTM.getTargetTriple();
-  bool UsePCRel = shouldAssumeDSOLocal(RM, TargetTriple, *GV->getParent(), GV);
+  bool UsePCRel = getTargetMachine().shouldAssumeDSOLocal(*GV->getParent(), GV);
   if (UsePCRel) {
     SDValue GA = DAG.getTargetGlobalAddress(GV, dl, PtrVT, Offset,
                                             HexagonII::MO_PCREL);
@@ -2814,18 +2812,17 @@ HexagonTargetLowering::getPICJumpTableRelocBase(SDValue Table,
   return DAG.getNode(HexagonISD::AT_PCREL, SDLoc(Table), VT, T);
 }
 
-MachineBasicBlock *
-HexagonTargetLowering::EmitInstrWithCustomInserter(MachineInstr *MI,
-                                                   MachineBasicBlock *BB)
-      const {
-  switch (MI->getOpcode()) {
-    case Hexagon::ALLOCA: {
-      MachineFunction *MF = BB->getParent();
-      auto *FuncInfo = MF->getInfo<HexagonMachineFunctionInfo>();
-      FuncInfo->addAllocaAdjustInst(MI);
-      return BB;
-    }
-    default: llvm_unreachable("Unexpected instr type to insert");
+MachineBasicBlock *HexagonTargetLowering::EmitInstrWithCustomInserter(
+    MachineInstr &MI, MachineBasicBlock *BB) const {
+  switch (MI.getOpcode()) {
+  case Hexagon::ALLOCA: {
+    MachineFunction *MF = BB->getParent();
+    auto *FuncInfo = MF->getInfo<HexagonMachineFunctionInfo>();
+    FuncInfo->addAllocaAdjustInst(&MI);
+    return BB;
+  }
+  default:
+    llvm_unreachable("Unexpected instr type to insert");
   } // switch
 }
 

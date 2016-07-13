@@ -201,8 +201,8 @@ def InMips16Mode :    Predicate<"Subtarget->inMips16Mode()">,
                       AssemblerPredicate<"FeatureMips16">;
 def HasCnMips    :    Predicate<"Subtarget->hasCnMips()">,
                       AssemblerPredicate<"FeatureCnMips">;
-def RelocStatic :     Predicate<"TM.getRelocationModel() == Reloc::Static">;
-def RelocPIC    :     Predicate<"TM.getRelocationModel() == Reloc::PIC_">;
+def RelocNotPIC :     Predicate<"!TM.isPositionIndependent()">;
+def RelocPIC    :     Predicate<"TM.isPositionIndependent()">;
 def NoNaNsFPMath :    Predicate<"TM.Options.NoNaNsFPMath">;
 def HasStdEnc :       Predicate<"Subtarget->hasStandardEncoding()">,
                       AssemblerPredicate<"!FeatureMips16">;
@@ -1742,9 +1742,10 @@ let AdditionalPredicates = [NotInMicroMips] in {
 
 /// Load and Store Instructions
 ///  aligned
-def LB  : Load<"lb", GPR32Opnd, sextloadi8, II_LB>, MMRel, LW_FM<0x20>;
-def LBu : Load<"lbu", GPR32Opnd, zextloadi8, II_LBU, addrDefault>, MMRel,
-          LW_FM<0x24>;
+def LB  : LoadMemory<"lb", GPR32Opnd, mem_simm16, sextloadi8, II_LB>, MMRel,
+          LW_FM<0x20>;
+def LBu : LoadMemory<"lbu", GPR32Opnd, mem_simm16, zextloadi8, II_LBU,
+                     addrDefault>, MMRel, LW_FM<0x24>;
 let AdditionalPredicates = [NotInMicroMips] in {
   def LH  : LoadMemory<"lh", GPR32Opnd, mem_simm16, sextloadi16, II_LH,
                        addrDefault>, MMRel, LW_FM<0x21>;
@@ -1775,14 +1776,14 @@ def SWR : StoreLeftRight<"swr", MipsSWR, GPR32Opnd, II_SWR>, LW_FM<0x2e>,
 
 let AdditionalPredicates = [NotInMicroMips] in {
 // COP2 Memory Instructions
-def LWC2 : LW_FT2<"lwc2", COP2Opnd, II_LWC2, load>, LW_FM<0x32>,
+def LWC2 : StdMMR6Rel, LW_FT2<"lwc2", COP2Opnd, II_LWC2, load>, LW_FM<0x32>,
            ISA_MIPS1_NOT_32R6_64R6;
-def SWC2 : SW_FT2<"swc2", COP2Opnd, II_SWC2, store>, LW_FM<0x3a>,
-           ISA_MIPS1_NOT_32R6_64R6;
-def LDC2 : LW_FT2<"ldc2", COP2Opnd, II_LDC2, load>, LW_FM<0x36>,
+def SWC2 : StdMMR6Rel, SW_FT2<"swc2", COP2Opnd, II_SWC2, store>,
+           LW_FM<0x3a>, ISA_MIPS1_NOT_32R6_64R6;
+def LDC2 : StdMMR6Rel, LW_FT2<"ldc2", COP2Opnd, II_LDC2, load>, LW_FM<0x36>,
            ISA_MIPS2_NOT_32R6_64R6;
-def SDC2 : SW_FT2<"sdc2", COP2Opnd, II_SDC2, store>, LW_FM<0x3e>,
-           ISA_MIPS2_NOT_32R6_64R6;
+def SDC2 : StdMMR6Rel, SW_FT2<"sdc2", COP2Opnd, II_SDC2, store>,
+           LW_FM<0x3e>, ISA_MIPS2_NOT_32R6_64R6;
 
 // COP3 Memory Instructions
 let DecoderNamespace = "COP3_" in {
@@ -1854,7 +1855,7 @@ def SC : SCBase<"sc", GPR32Opnd>, LW_FM<0x38>, PTR_32, ISA_MIPS2_NOT_32R6_64R6;
 
 /// Jump and Branch Instructions
 def J       : MMRel, JumpFJ<jmptarget, "j", br, bb, "j">, FJ<2>,
-              AdditionalRequires<[RelocStatic]>, IsBranch;
+              AdditionalRequires<[RelocNotPIC]>, IsBranch;
 def JR      : MMRel, IndirectBranch<"jr", GPR32Opnd>, MTLO_FM<8>, ISA_MIPS1_NOT_32R6_64R6; 
 def BEQ     : MMRel, CBranch<"beq", brtarget, seteq, GPR32Opnd>, BEQ_FM<4>;
 def BEQL    : MMRel, CBranch<"beql", brtarget, seteq, GPR32Opnd, 0>,

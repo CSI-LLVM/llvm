@@ -76,7 +76,7 @@ private:
   bool shouldSkip(MachineBasicBlock *From, MachineBasicBlock *To);
 
   void Skip(MachineInstr &From, MachineOperand &To);
-  void SkipIfDead(MachineInstr &MI);
+  bool skipIfDead(MachineInstr &MI, MachineBasicBlock &NextBB);
 
   void If(MachineInstr &MI);
   void Else(MachineInstr &MI, bool ExecModified);
@@ -89,18 +89,28 @@ private:
   void Kill(MachineInstr &MI);
   void Branch(MachineInstr &MI);
 
-  void splitBlockLiveIns(const MachineBasicBlock &MBB,
-                         const MachineInstr &MI,
-                         MachineBasicBlock &LoopBB,
-                         MachineBasicBlock &RemainderBB,
-                         unsigned SaveReg,
-                         unsigned IdxReg);
+  MachineBasicBlock *insertSkipBlock(MachineBasicBlock &MBB,
+                                     MachineBasicBlock::iterator I) const;
+
+  std::pair<MachineBasicBlock *, MachineBasicBlock *>
+  splitBlock(MachineBasicBlock &MBB, MachineBasicBlock::iterator I);
+
+  void splitLoadM0BlockLiveIns(LivePhysRegs &RemainderLiveRegs,
+                               const MachineRegisterInfo &MRI,
+                               const MachineInstr &MI,
+                               MachineBasicBlock &LoopBB,
+                               MachineBasicBlock &RemainderBB,
+                               unsigned SaveReg,
+                               const MachineOperand &IdxReg);
 
   void emitLoadM0FromVGPRLoop(MachineBasicBlock &LoopBB, DebugLoc DL,
-                              MachineInstr *MovRel, unsigned IdxReg, int Offset);
+                              MachineInstr *MovRel,
+                              const MachineOperand &IdxReg,
+                              int Offset);
 
   bool loadM0(MachineInstr &MI, MachineInstr *MovRel, int Offset = 0);
-  void computeIndirectRegAndOffset(unsigned VecReg, unsigned &Reg, int &Offset);
+  std::pair<unsigned, int> computeIndirectRegAndOffset(unsigned VecReg,
+                                                       int Offset) const;
   bool indirectSrc(MachineInstr &MI);
   bool indirectDst(MachineInstr &MI);
 
@@ -168,7 +178,19 @@ bool SILowerControlFlow::shouldSkip(MachineBasicBlock *From,
           I->getOpcode() == AMDGPU::S_CBRANCH_VCCZ)
         return true;
 
-      if (++NumInstr >= SkipThreshold)
+      if (I->isInlineAsm()) {
+        const MCAsmInfo *MAI = MF->getTarget().getMCAsmInfo();
+        const char *AsmStr = I->getOperand(0).getSymbolName();
+
+        // inlineasm length estimate is number of bytes assuming the longest
+        // instruction.
+        uint64_t MaxAsmSize = TII->getInlineAsmLength(AsmStr, *MAI);
+        NumInstr += MaxAsmSize / MAI->getMaxInstLength();
+      } else {
+        ++NumInstr;
+      }
+
+      if (NumInstr >= SkipThreshold)
         return true;
     }
   }
@@ -186,36 +208,41 @@ void SILowerControlFlow::Skip(MachineInstr &From, MachineOperand &To) {
     .addOperand(To);
 }
 
-void SILowerControlFlow::SkipIfDead(MachineInstr &MI) {
-
+bool SILowerControlFlow::skipIfDead(MachineInstr &MI, MachineBasicBlock &NextBB) {
   MachineBasicBlock &MBB = *MI.getParent();
-  DebugLoc DL = MI.getDebugLoc();
+  MachineFunction *MF = MBB.getParent();
 
-  if (MBB.getParent()->getFunction()->getCallingConv() != CallingConv::AMDGPU_PS ||
+  if (MF->getFunction()->getCallingConv() != CallingConv::AMDGPU_PS ||
       !shouldSkip(&MBB, &MBB.getParent()->back()))
-    return;
+    return false;
 
-  MachineBasicBlock::iterator Insert = &MI;
-  ++Insert;
+  MachineBasicBlock *SkipBB = insertSkipBlock(MBB, MI.getIterator());
+  SkipBB->addSuccessor(&NextBB);
+
+  const DebugLoc &DL = MI.getDebugLoc();
 
   // If the exec mask is non-zero, skip the next two instructions
-  BuildMI(MBB, Insert, DL, TII->get(AMDGPU::S_CBRANCH_EXECNZ))
-    .addImm(3);
+  BuildMI(&MBB, DL, TII->get(AMDGPU::S_CBRANCH_EXECNZ))
+    .addMBB(&NextBB);
+
+  MachineBasicBlock::iterator Insert = SkipBB->begin();
 
   // Exec mask is zero: Export to NULL target...
-  BuildMI(MBB, Insert, DL, TII->get(AMDGPU::EXP))
-          .addImm(0)
-          .addImm(0x09) // V_008DFC_SQ_EXP_NULL
-          .addImm(0)
-          .addImm(1)
-          .addImm(1)
-          .addReg(AMDGPU::VGPR0)
-          .addReg(AMDGPU::VGPR0)
-          .addReg(AMDGPU::VGPR0)
-          .addReg(AMDGPU::VGPR0);
+  BuildMI(*SkipBB, Insert, DL, TII->get(AMDGPU::EXP))
+    .addImm(0)
+    .addImm(0x09) // V_008DFC_SQ_EXP_NULL
+    .addImm(0)
+    .addImm(1)
+    .addImm(1)
+    .addReg(AMDGPU::VGPR0, RegState::Undef)
+    .addReg(AMDGPU::VGPR0, RegState::Undef)
+    .addReg(AMDGPU::VGPR0, RegState::Undef)
+    .addReg(AMDGPU::VGPR0, RegState::Undef);
 
-  // ... and terminate wavefront
-  BuildMI(MBB, Insert, DL, TII->get(AMDGPU::S_ENDPGM));
+  // ... and terminate wavefront.
+  BuildMI(*SkipBB, Insert, DL, TII->get(AMDGPU::S_ENDPGM));
+
+  return true;
 }
 
 void SILowerControlFlow::If(MachineInstr &MI) {
@@ -234,8 +261,9 @@ void SILowerControlFlow::If(MachineInstr &MI) {
   Skip(MI, MI.getOperand(2));
 
   // Insert a pseudo terminator to help keep the verifier happy.
-  BuildMI(MBB, &MI, DL, TII->get(AMDGPU::SI_MASK_BRANCH), Reg)
-    .addOperand(MI.getOperand(2));
+  BuildMI(MBB, &MI, DL, TII->get(AMDGPU::SI_MASK_BRANCH))
+    .addOperand(MI.getOperand(2))
+    .addReg(Reg);
 
   MI.eraseFromParent();
 }
@@ -266,8 +294,9 @@ void SILowerControlFlow::Else(MachineInstr &MI, bool ExecModified) {
   Skip(MI, MI.getOperand(2));
 
   // Insert a pseudo terminator to help keep the verifier happy.
-  BuildMI(MBB, &MI, DL, TII->get(AMDGPU::SI_MASK_BRANCH), Dst)
-    .addOperand(MI.getOperand(2));
+  BuildMI(MBB, &MI, DL, TII->get(AMDGPU::SI_MASK_BRANCH))
+    .addOperand(MI.getOperand(2))
+    .addReg(Dst);
 
   MI.eraseFromParent();
 }
@@ -381,47 +410,47 @@ void SILowerControlFlow::Kill(MachineInstr &MI) {
 }
 
 // All currently live registers must remain so in the remainder block.
-void SILowerControlFlow::splitBlockLiveIns(const MachineBasicBlock &MBB,
-                                           const MachineInstr &MI,
-                                           MachineBasicBlock &LoopBB,
-                                           MachineBasicBlock &RemainderBB,
-                                           unsigned SaveReg,
-                                           unsigned IdxReg) {
-  LivePhysRegs RemainderLiveRegs(TRI);
-
-  RemainderLiveRegs.addLiveOuts(MBB);
-  for (MachineBasicBlock::const_reverse_iterator I = MBB.rbegin(), E(&MI);
-       I != E; ++I) {
-    RemainderLiveRegs.stepBackward(*I);
-  }
-
+void SILowerControlFlow::splitLoadM0BlockLiveIns(LivePhysRegs &RemainderLiveRegs,
+                                                 const MachineRegisterInfo &MRI,
+                                                 const MachineInstr &MI,
+                                                 MachineBasicBlock &LoopBB,
+                                                 MachineBasicBlock &RemainderBB,
+                                                 unsigned SaveReg,
+                                                 const MachineOperand &IdxReg) {
   // Add reg defined in loop body.
   RemainderLiveRegs.addReg(SaveReg);
 
   if (const MachineOperand *Val = TII->getNamedOperand(MI, AMDGPU::OpName::val)) {
-    RemainderLiveRegs.addReg(Val->getReg());
-    LoopBB.addLiveIn(Val->getReg());
+    if (!Val->isUndef()) {
+      RemainderLiveRegs.addReg(Val->getReg());
+      LoopBB.addLiveIn(Val->getReg());
+    }
   }
 
-  for (unsigned Reg : RemainderLiveRegs)
-    RemainderBB.addLiveIn(Reg);
+  for (unsigned Reg : RemainderLiveRegs) {
+    if (MRI.isAllocatable(Reg))
+      RemainderBB.addLiveIn(Reg);
+  }
 
-  unsigned SrcReg = TII->getNamedOperand(MI, AMDGPU::OpName::src)->getReg();
-  LoopBB.addLiveIn(SrcReg);
-  LoopBB.addLiveIn(IdxReg);
+  const MachineOperand *Src = TII->getNamedOperand(MI, AMDGPU::OpName::src);
+  if (!Src->isUndef())
+    LoopBB.addLiveIn(Src->getReg());
+
+  if (!IdxReg.isUndef())
+    LoopBB.addLiveIn(IdxReg.getReg());
   LoopBB.sortUniqueLiveIns();
 }
 
 void SILowerControlFlow::emitLoadM0FromVGPRLoop(MachineBasicBlock &LoopBB,
                                                 DebugLoc DL,
                                                 MachineInstr *MovRel,
-                                                unsigned IdxReg,
+                                                const MachineOperand &IdxReg,
                                                 int Offset) {
   MachineBasicBlock::iterator I = LoopBB.begin();
 
   // Read the next variant into VCC (lower 32 bits) <- also loop target
   BuildMI(LoopBB, I, DL, TII->get(AMDGPU::V_READFIRSTLANE_B32), AMDGPU::VCC_LO)
-    .addReg(IdxReg);
+    .addReg(IdxReg.getReg(), getUndefRegState(IdxReg.isUndef()));
 
   // Move index from VCC into M0
   BuildMI(LoopBB, I, DL, TII->get(AMDGPU::S_MOV_B32), AMDGPU::M0)
@@ -430,13 +459,13 @@ void SILowerControlFlow::emitLoadM0FromVGPRLoop(MachineBasicBlock &LoopBB,
   // Compare the just read M0 value to all possible Idx values
   BuildMI(LoopBB, I, DL, TII->get(AMDGPU::V_CMP_EQ_U32_e32))
     .addReg(AMDGPU::M0)
-    .addReg(IdxReg);
+    .addReg(IdxReg.getReg(), getUndefRegState(IdxReg.isUndef()));
 
   // Update EXEC, save the original EXEC value to VCC
   BuildMI(LoopBB, I, DL, TII->get(AMDGPU::S_AND_SAVEEXEC_B64), AMDGPU::VCC)
     .addReg(AMDGPU::VCC);
 
-  if (Offset) {
+  if (Offset != 0) {
     BuildMI(LoopBB, I, DL, TII->get(AMDGPU::S_ADD_I32), AMDGPU::M0)
       .addReg(AMDGPU::M0)
       .addImm(Offset);
@@ -455,22 +484,60 @@ void SILowerControlFlow::emitLoadM0FromVGPRLoop(MachineBasicBlock &LoopBB,
     .addMBB(&LoopBB);
 }
 
+MachineBasicBlock *SILowerControlFlow::insertSkipBlock(
+  MachineBasicBlock &MBB, MachineBasicBlock::iterator I) const {
+  MachineFunction *MF = MBB.getParent();
+
+  MachineBasicBlock *SkipBB = MF->CreateMachineBasicBlock();
+  MachineFunction::iterator MBBI(MBB);
+  ++MBBI;
+
+  MF->insert(MBBI, SkipBB);
+  MBB.addSuccessor(SkipBB);
+
+  return SkipBB;
+}
+
+std::pair<MachineBasicBlock *, MachineBasicBlock *>
+SILowerControlFlow::splitBlock(MachineBasicBlock &MBB,
+                               MachineBasicBlock::iterator I) {
+  MachineFunction *MF = MBB.getParent();
+
+  // To insert the loop we need to split the block. Move everything after this
+  // point to a new block, and insert a new empty block between the two.
+  MachineBasicBlock *LoopBB = MF->CreateMachineBasicBlock();
+  MachineBasicBlock *RemainderBB = MF->CreateMachineBasicBlock();
+  MachineFunction::iterator MBBI(MBB);
+  ++MBBI;
+
+  MF->insert(MBBI, LoopBB);
+  MF->insert(MBBI, RemainderBB);
+
+  // Move the rest of the block into a new block.
+  RemainderBB->transferSuccessors(&MBB);
+  RemainderBB->splice(RemainderBB->begin(), &MBB, I, MBB.end());
+
+  MBB.addSuccessor(LoopBB);
+
+  return std::make_pair(LoopBB, RemainderBB);
+}
+
 // Returns true if a new block was inserted.
 bool SILowerControlFlow::loadM0(MachineInstr &MI, MachineInstr *MovRel, int Offset) {
   MachineBasicBlock &MBB = *MI.getParent();
   DebugLoc DL = MI.getDebugLoc();
   MachineBasicBlock::iterator I(&MI);
 
-  unsigned Idx = TII->getNamedOperand(MI, AMDGPU::OpName::idx)->getReg();
+  const MachineOperand *Idx = TII->getNamedOperand(MI, AMDGPU::OpName::idx);
 
-  if (AMDGPU::SReg_32RegClass.contains(Idx)) {
-    if (Offset) {
+  if (AMDGPU::SReg_32RegClass.contains(Idx->getReg())) {
+    if (Offset != 0) {
       BuildMI(MBB, I, DL, TII->get(AMDGPU::S_ADD_I32), AMDGPU::M0)
-        .addReg(Idx)
+        .addReg(Idx->getReg(), getUndefRegState(Idx->isUndef()))
         .addImm(Offset);
     } else {
       BuildMI(MBB, I, DL, TII->get(AMDGPU::S_MOV_B32), AMDGPU::M0)
-        .addReg(Idx);
+        .addReg(Idx->getReg(), getUndefRegState(Idx->isUndef()));
     }
 
     MBB.insert(I, MovRel);
@@ -478,40 +545,38 @@ bool SILowerControlFlow::loadM0(MachineInstr &MI, MachineInstr *MovRel, int Offs
     return false;
   }
 
-  MachineFunction &MF = *MBB.getParent();
   MachineOperand *SaveOp = TII->getNamedOperand(MI, AMDGPU::OpName::sdst);
   SaveOp->setIsDead(false);
   unsigned Save = SaveOp->getReg();
 
   // Reading from a VGPR requires looping over all workitems in the wavefront.
   assert(AMDGPU::SReg_64RegClass.contains(Save) &&
-         AMDGPU::VGPR_32RegClass.contains(Idx));
+         AMDGPU::VGPR_32RegClass.contains(Idx->getReg()));
 
   // Save the EXEC mask
   BuildMI(MBB, I, DL, TII->get(AMDGPU::S_MOV_B64), Save)
     .addReg(AMDGPU::EXEC);
 
-  // To insert the loop we need to split the block. Move everything after this
-  // point to a new block, and insert a new empty block between the two.
-  MachineBasicBlock *LoopBB = MF.CreateMachineBasicBlock();
-  MachineBasicBlock *RemainderBB = MF.CreateMachineBasicBlock();
-  MachineFunction::iterator MBBI(MBB);
-  ++MBBI;
+  LivePhysRegs RemainderLiveRegs(TRI);
 
-  MF.insert(MBBI, LoopBB);
-  MF.insert(MBBI, RemainderBB);
+  RemainderLiveRegs.addLiveOuts(MBB);
 
-  LoopBB->addSuccessor(LoopBB);
+  MachineBasicBlock *LoopBB;
+  MachineBasicBlock *RemainderBB;
+
+  std::tie(LoopBB, RemainderBB) = splitBlock(MBB, I);
+
+  for (const MachineInstr &Inst : reverse(*RemainderBB))
+    RemainderLiveRegs.stepBackward(Inst);
+
+  MachineRegisterInfo &MRI = MBB.getParent()->getRegInfo();
   LoopBB->addSuccessor(RemainderBB);
+  LoopBB->addSuccessor(LoopBB);
 
-  if (TRI->trackLivenessAfterRegAlloc(MF))
-    splitBlockLiveIns(MBB, MI, *LoopBB, *RemainderBB, Save, Idx);
+  splitLoadM0BlockLiveIns(RemainderLiveRegs, MRI, MI, *LoopBB,
+                          *RemainderBB, Save, *Idx);
 
-  // Move the rest of the block into a new block.
-  RemainderBB->transferSuccessors(&MBB);
-  RemainderBB->splice(RemainderBB->begin(), &MBB, I, MBB.end());
-
-  emitLoadM0FromVGPRLoop(*LoopBB, DL, MovRel, Idx, Offset);
+  emitLoadM0FromVGPRLoop(*LoopBB, DL, MovRel, *Idx, Offset);
 
   MachineBasicBlock::iterator First = RemainderBB->begin();
   BuildMI(*RemainderBB, First, DL, TII->get(AMDGPU::S_MOV_B64), AMDGPU::EXEC)
@@ -521,23 +586,33 @@ bool SILowerControlFlow::loadM0(MachineInstr &MI, MachineInstr *MovRel, int Offs
   return true;
 }
 
-/// \param @VecReg The register which holds element zero of the vector
-///                 being addressed into.
-/// \param[out] @Reg The base register to use in the indirect addressing instruction.
-/// \param[in,out] @Offset As an input, this is the constant offset part of the
-//                         indirect Index. e.g. v0 = v[VecReg + Offset]
-//                         As an output, this is a constant value that needs
-//                         to be added to the value stored in M0.
-void SILowerControlFlow::computeIndirectRegAndOffset(unsigned VecReg,
-                                                     unsigned &Reg,
-                                                     int &Offset) {
+/// \param @VecReg The register which holds element zero of the vector being
+///                 addressed into.
+//
+/// \param[in] @Idx The index operand from the movrel instruction. This must be
+// a register, but may be NoRegister.
+///
+/// \param[in] @Offset As an input, this is the constant offset part of the
+// indirect Index. e.g. v0 = v[VecReg + Offset] As an output, this is a constant
+// value that needs to be added to the value stored in M0.
+std::pair<unsigned, int>
+SILowerControlFlow::computeIndirectRegAndOffset(unsigned VecReg, int Offset) const {
   unsigned SubReg = TRI->getSubReg(VecReg, AMDGPU::sub0);
   if (!SubReg)
     SubReg = VecReg;
 
+  const TargetRegisterClass *SuperRC = TRI->getPhysRegClass(VecReg);
   const TargetRegisterClass *RC = TRI->getPhysRegClass(SubReg);
-  int RegIdx = TRI->getHWRegIndex(SubReg) + Offset;
+  int NumElts = SuperRC->getSize() / RC->getSize();
 
+  int BaseRegIdx = TRI->getHWRegIndex(SubReg);
+
+  // Skip out of bounds offsets, or else we would end up using an undefined
+  // register.
+  if (Offset >= NumElts)
+    return std::make_pair(RC->getRegister(BaseRegIdx), Offset);
+
+  int RegIdx = BaseRegIdx + Offset;
   if (RegIdx < 0) {
     Offset = RegIdx;
     RegIdx = 0;
@@ -545,48 +620,66 @@ void SILowerControlFlow::computeIndirectRegAndOffset(unsigned VecReg,
     Offset = 0;
   }
 
-  Reg = RC->getRegister(RegIdx);
+  unsigned Reg = RC->getRegister(RegIdx);
+  return std::make_pair(Reg, Offset);
 }
 
 // Return true if a new block was inserted.
 bool SILowerControlFlow::indirectSrc(MachineInstr &MI) {
   MachineBasicBlock &MBB = *MI.getParent();
-  DebugLoc DL = MI.getDebugLoc();
+  const DebugLoc &DL = MI.getDebugLoc();
 
   unsigned Dst = MI.getOperand(0).getReg();
-  unsigned Vec = TII->getNamedOperand(MI, AMDGPU::OpName::src)->getReg();
-  int Off = TII->getNamedOperand(MI, AMDGPU::OpName::offset)->getImm();
+  const MachineOperand *SrcVec = TII->getNamedOperand(MI, AMDGPU::OpName::src);
+  int Offset = TII->getNamedOperand(MI, AMDGPU::OpName::offset)->getImm();
   unsigned Reg;
 
-  computeIndirectRegAndOffset(Vec, Reg, Off);
+  std::tie(Reg, Offset) = computeIndirectRegAndOffset(SrcVec->getReg(), Offset);
+
+  const MachineOperand *Idx = TII->getNamedOperand(MI, AMDGPU::OpName::idx);
+  if (Idx->getReg() == AMDGPU::NoRegister) {
+    // Only had a constant offset, copy the register directly.
+    BuildMI(MBB, MI.getIterator(), DL, TII->get(AMDGPU::V_MOV_B32_e32), Dst)
+      .addReg(Reg, getUndefRegState(SrcVec->isUndef()));
+    MI.eraseFromParent();
+    return false;
+  }
 
   MachineInstr *MovRel =
     BuildMI(*MBB.getParent(), DL, TII->get(AMDGPU::V_MOVRELS_B32_e32), Dst)
-    .addReg(Reg)
-    .addReg(Vec, RegState::Implicit);
+    .addReg(Reg, getUndefRegState(SrcVec->isUndef()))
+    .addReg(SrcVec->getReg(), RegState::Implicit);
 
-  return loadM0(MI, MovRel, Off);
+  return loadM0(MI, MovRel, Offset);
 }
 
 // Return true if a new block was inserted.
 bool SILowerControlFlow::indirectDst(MachineInstr &MI) {
   MachineBasicBlock &MBB = *MI.getParent();
-  DebugLoc DL = MI.getDebugLoc();
+  const DebugLoc &DL = MI.getDebugLoc();
 
   unsigned Dst = MI.getOperand(0).getReg();
-  int Off = TII->getNamedOperand(MI, AMDGPU::OpName::offset)->getImm();
-  unsigned Val = TII->getNamedOperand(MI, AMDGPU::OpName::val)->getReg();
+  int Offset = TII->getNamedOperand(MI, AMDGPU::OpName::offset)->getImm();
   unsigned Reg;
 
-  computeIndirectRegAndOffset(Dst, Reg, Off);
+  const MachineOperand *Val = TII->getNamedOperand(MI, AMDGPU::OpName::val);
+  std::tie(Reg, Offset) = computeIndirectRegAndOffset(Dst, Offset);
+
+  MachineOperand *Idx = TII->getNamedOperand(MI, AMDGPU::OpName::idx);
+  if (Idx->getReg() == AMDGPU::NoRegister) {
+    // Only had a constant offset, copy the register directly.
+    BuildMI(MBB, MI.getIterator(), DL, TII->get(AMDGPU::V_MOV_B32_e32), Reg)
+      .addOperand(*Val);
+    MI.eraseFromParent();
+    return false;
+  }
 
   MachineInstr *MovRel =
-    BuildMI(*MBB.getParent(), DL, TII->get(AMDGPU::V_MOVRELD_B32_e32))
-    .addReg(Reg, RegState::Define)
-    .addReg(Val)
+    BuildMI(*MBB.getParent(), DL, TII->get(AMDGPU::V_MOVRELD_B32_e32), Reg)
+    .addReg(Val->getReg(), getUndefRegState(Val->isUndef()))
     .addReg(Dst, RegState::Implicit);
 
-  return loadM0(MI, MovRel, Off);
+  return loadM0(MI, MovRel, Offset);
 }
 
 bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
@@ -620,12 +713,8 @@ bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
       if (TII->isFLAT(MI))
         NeedFlat = true;
 
-      for (const auto &Def : I->defs()) {
-        if (Def.isReg() && Def.isDef() && Def.getReg() == AMDGPU::EXEC) {
-          ExecModified = true;
-          break;
-        }
-      }
+      if (I->modifiesRegister(AMDGPU::EXEC, TRI))
+        ExecModified = true;
 
       switch (MI.getOpcode()) {
         default: break;
@@ -657,16 +746,25 @@ bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
 
         case AMDGPU::SI_END_CF:
           if (--Depth == 0 && HaveKill) {
-            SkipIfDead(MI);
             HaveKill = false;
+
+            if (skipIfDead(MI, *NextBB)) {
+              NextBB = std::next(BI);
+              BE = MF.end();
+              Next = MBB.end();
+            }
           }
           EndCf(MI);
           break;
 
-        case AMDGPU::SI_KILL:
-          if (Depth == 0)
-            SkipIfDead(MI);
-          else
+        case AMDGPU::SI_KILL_TERMINATOR:
+          if (Depth == 0) {
+            if (skipIfDead(MI, *NextBB)) {
+              NextBB = std::next(BI);
+              BE = MF.end();
+              Next = MBB.end();
+            }
+          } else
             HaveKill = true;
           Kill(MI);
           break;
@@ -707,14 +805,13 @@ bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
 
           break;
 
-        case AMDGPU::S_ENDPGM: {
-          if (MF.getInfo<SIMachineFunctionInfo>()->returnsVoid())
-            break;
+        case AMDGPU::SI_RETURN: {
+          assert(!MF.getInfo<SIMachineFunctionInfo>()->returnsVoid());
 
           // Graphics shaders returning non-void shouldn't contain S_ENDPGM,
           // because external bytecode will be appended at the end.
           if (BI != --MF.end() || I != MBB.getFirstTerminator()) {
-            // S_ENDPGM is not the last instruction. Add an empty block at
+            // SI_RETURN is not the last instruction. Add an empty block at
             // the end and jump there.
             if (!EmptyMBBAtEnd) {
               EmptyMBBAtEnd = MF.CreateMachineBasicBlock();
@@ -724,9 +821,8 @@ bool SILowerControlFlow::runOnMachineFunction(MachineFunction &MF) {
             MBB.addSuccessor(EmptyMBBAtEnd);
             BuildMI(*BI, I, MI.getDebugLoc(), TII->get(AMDGPU::S_BRANCH))
                     .addMBB(EmptyMBBAtEnd);
+            I->eraseFromParent();
           }
-
-          I->eraseFromParent();
           break;
         }
       }

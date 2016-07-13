@@ -14,7 +14,6 @@
 #include "llvm/Target/TargetLowering.h"
 #include "llvm/ADT/BitVector.h"
 #include "llvm/ADT/STLExtras.h"
-#include "llvm/CodeGen/Analysis.h"
 #include "llvm/CodeGen/CallingConvLower.h"
 #include "llvm/CodeGen/MachineFrameInfo.h"
 #include "llvm/CodeGen/MachineFunction.h"
@@ -45,7 +44,7 @@ const char *TargetLowering::getTargetNodeName(unsigned Opcode) const {
 }
 
 bool TargetLowering::isPositionIndependent() const {
-  return getTargetMachine().getRelocationModel() == Reloc::PIC_;
+  return getTargetMachine().isPositionIndependent();
 }
 
 /// Check whether a given call node is in tail position within its function. If
@@ -316,13 +315,11 @@ TargetLowering::getPICJumpTableRelocBaseExpr(const MachineFunction *MF,
 bool
 TargetLowering::isOffsetFoldingLegal(const GlobalAddressSDNode *GA) const {
   const TargetMachine &TM = getTargetMachine();
-  Reloc::Model RM = TM.getRelocationModel();
   const GlobalValue *GV = GA->getGlobal();
-  const Triple &TargetTriple = TM.getTargetTriple();
 
   // If the address is not even local to this DSO we will have to load it from
   // a got and then add the offset.
-  if (!shouldAssumeDSOLocal(RM, TargetTriple, *GV->getParent(), GV))
+  if (!TM.shouldAssumeDSOLocal(*GV->getParent(), GV))
     return false;
 
   // If the code is position independent we will have to add a base register.

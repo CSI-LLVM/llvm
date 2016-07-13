@@ -18,6 +18,28 @@
 
 using namespace llvm;
 
+Expected<CoveragePrinter::OwnedStream>
+CoveragePrinterText::createViewFile(StringRef Path, bool InToplevel) {
+  return createOutputStream(Path, "txt", InToplevel);
+}
+
+void CoveragePrinterText::closeViewFile(OwnedStream OS) {
+  OS->operator<<('\n');
+}
+
+Error CoveragePrinterText::createIndexFile(ArrayRef<StringRef> SourceFiles) {
+  auto OSOrErr = createOutputStream("index", "txt", /*InToplevel=*/true);
+  if (Error E = OSOrErr.takeError())
+    return E;
+  auto OS = std::move(OSOrErr.get());
+  raw_ostream &OSRef = *OS.get();
+
+  for (StringRef SF : SourceFiles)
+    OSRef << getOutputPath(SF, "txt", /*InToplevel=*/false) << '\n';
+
+  return Error::success();
+}
+
 namespace {
 
 static const unsigned LineCoverageColumnWidth = 7;
@@ -37,6 +59,10 @@ unsigned getDividerWidth(const CoverageViewOptions &Opts) {
 
 } // anonymous namespace
 
+void SourceCoverageViewText::renderViewHeader(raw_ostream &) {}
+
+void SourceCoverageViewText::renderViewFooter(raw_ostream &) {}
+
 void SourceCoverageViewText::renderSourceName(raw_ostream &OS) {
   getOptions().colored_ostream(OS, raw_ostream::CYAN) << getSourceName()
                                                       << ":\n";
@@ -47,6 +73,8 @@ void SourceCoverageViewText::renderLinePrefix(raw_ostream &OS,
   for (unsigned I = 0; I < ViewDepth; ++I)
     OS << "  |";
 }
+
+void SourceCoverageViewText::renderLineSuffix(raw_ostream &, unsigned) {}
 
 void SourceCoverageViewText::renderViewDivider(raw_ostream &OS,
                                                unsigned ViewDepth) {
@@ -158,8 +186,7 @@ void SourceCoverageViewText::renderRegionMarkers(
 }
 
 void SourceCoverageViewText::renderExpansionSite(
-    raw_ostream &OS, ExpansionView &ESV, LineRef L,
-    const coverage::CoverageSegment *WrappedSegment,
+    raw_ostream &OS, LineRef L, const coverage::CoverageSegment *WrappedSegment,
     CoverageSegmentArray Segments, unsigned ExpansionCol, unsigned ViewDepth) {
   renderLinePrefix(OS, ViewDepth);
   OS.indent(getCombinedColumnWidth(getOptions()) + (ViewDepth == 0 ? 0 : 1));
