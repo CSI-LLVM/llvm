@@ -21,6 +21,7 @@ entry:
 ; CHECK: @__csi_unit_callsite_base_id = internal global i64 0
 ; CHECK: @__csi_unit_load_base_id = internal global i64 0
 ; CHECK: @__csi_unit_store_base_id = internal global i64 0
+; CHECK: @__csi_disable_instrumentation = external thread_local externally_initialized global i1
 ; CHECK: @__csi_func_id_foo = weak global i64 -1
 ; CHECK: @__csi_func_id_main = weak global i64 -1
 ; CHECK: @__csi_unit_filename = private unnamed_addr constant [1 x i8] zeroinitializer

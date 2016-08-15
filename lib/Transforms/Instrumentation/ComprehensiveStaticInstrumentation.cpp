@@ -8,6 +8,7 @@
 #include "llvm/IR/IntrinsicInst.h"
 #include "llvm/IR/Module.h"
 #include "llvm/Transforms/Instrumentation.h"
+#include "llvm/Transforms/Utils/BasicBlockUtils.h"
 #include "llvm/Transforms/Utils/ModuleUtils.h"
 
 using namespace llvm;
@@ -26,6 +27,8 @@ const char *const CsiFuncIdVariablePrefix = "__csi_func_id_";
 const char *const CsiUnitFedTableArrayName = "__csi_unit_fed_tables";
 const char *const CsiInitCallsiteToFunctionName =
     "__csi_init_callsite_to_function";
+const char *const CsiDisableInstrumentationName =
+    "__csi_disable_instrumentation";
 
 const int64_t CsiCallsiteUnknownTargetId = -1;
 // See llvm/tools/clang/lib/CodeGen/CodeGenModule.h:
@@ -231,6 +234,7 @@ private:
   CallGraph *CG;
   Function *MemmoveFn, *MemcpyFn, *MemsetFn;
   Function *InitCallsiteToFunction;
+  GlobalVariable *DisableInstrGV;
   Type *IntptrTy;
   std::map<std::string, uint64_t> FuncOffsetMap;
 }; // struct ComprehensiveStaticInstrumentation
@@ -549,14 +553,25 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
   }
   assert(FuncId != NULL);
 
+  Value *Cond = IRB.CreateICmpEQ(IRB.CreateLoad(DisableInstrGV), IRB.getInt1(false));
+  TerminatorInst *TI = SplitBlockAndInsertIfThen(Cond, I, false);
+  IRB.SetInsertPoint(TI);
+  IRB.CreateStore(IRB.getInt1(true), DisableInstrGV);
   uint64_t Prop = 0;
   Instruction *Call = IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
   setInstrumentationDebugLoc(I, Call);
+  IRB.CreateStore(IRB.getInt1(false), DisableInstrGV);
 
   BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
+  Cond = IRB.CreateICmpEQ(IRB.CreateLoad(DisableInstrGV), IRB.getInt1(false));
+  TI = SplitBlockAndInsertIfThen(Cond, &*IRB.GetInsertPoint(), false);
+  IRB.SetInsertPoint(TI);
+  IRB.CreateStore(IRB.getInt1(true), DisableInstrGV);
   Call = IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
+  IRB.CreateStore(IRB.getInt1(false), DisableInstrGV);
+
   setInstrumentationDebugLoc(I, Call);
 }
 
@@ -610,6 +625,11 @@ void ComprehensiveStaticInstrumentation::initializeCsi(Module &M) {
   InitCallsiteToFunction->setLinkage(GlobalValue::InternalLinkage);
 
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
+
+  DisableInstrGV = new GlobalVariable(M, IntegerType::get(M.getContext(), 1), false,
+                                      GlobalValue::ExternalLinkage, nullptr,
+                                      CsiDisableInstrumentationName, nullptr,
+                                      GlobalValue::GeneralDynamicTLSModel, 0, true);
 }
 
 // Create a struct type to match the unit_fed_entry_t type in csirt.c.
@@ -793,6 +813,19 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
     computeLoadAndStoreProperties(LoadAndStoreProperties, BBLoadsAndStores);
   }
 
+
+  // Instrument basic blocks Note that we do this before other
+  // instrumentation so that we put this at the beginning of the basic
+  // block, and then the function entry call goes before the call to
+  // basic block entry. Additionally, the branches inserted for
+  // __csi_disable_instrumentation insert new basic blocks, which we
+  // don't want to instrument.
+  uint64_t LocalId = FunctionFED.add(F);
+  FuncOffsetMap[F.getName()] = LocalId;
+  for (BasicBlock &BB : F) {
+    instrumentBasicBlock(BB);
+  }
+
   // Do this work in a separate loop after copying the iterators so that we
   // aren't modifying the list as we're iterating.
   for (std::pair<Instruction *, uint64_t> p : LoadAndStoreProperties) {
@@ -805,16 +838,6 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
 
   for (Instruction *I : Callsites) {
     instrumentCallsite(I);
-  }
-
-  // Instrument basic blocks
-  // Note that we do this before function entry so that we put this at the
-  // beginning of the basic block, and then the function entry call goes before
-  // the call to basic block entry.
-  uint64_t LocalId = FunctionFED.add(F);
-  FuncOffsetMap[F.getName()] = LocalId;
-  for (BasicBlock &BB : F) {
-    instrumentBasicBlock(BB);
   }
 
   // Instrument function entry/exit points.
