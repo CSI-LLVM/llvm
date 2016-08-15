@@ -518,28 +518,37 @@ void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
 }
 
 void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
-  IRBuilder<> IRB(I);
-  CallSite CS(I);
-  Instruction *Inst = CS.getInstruction();
-  Module *M = Inst->getParent()->getParent()->getParent();
-  Function *Called = CS.getCalledFunction();
+  Function *Called = NULL;
+  if (CallInst *CI = dyn_cast<CallInst>(I)) {
+    Called = CI->getCalledFunction();
+  } else if (InvokeInst *II = dyn_cast<InvokeInst>(I)) {
+    Called = II->getCalledFunction();
+  }
 
   if (Called && Called->getName().startswith("llvm.dbg")) {
     return;
   }
 
-  uint64_t LocalId = CallsiteFED.add(*Inst);
+  IRBuilder<> IRB(I);
+  uint64_t LocalId = CallsiteFED.add(*I);
   Value *CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
-
-  std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
-  GlobalVariable *FuncIdGV =
+  Value *FuncId = NULL;
+  if (Called) {
+    Module *M = I->getParent()->getParent()->getParent();
+    std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
+    GlobalVariable *FuncIdGV =
       dyn_cast<GlobalVariable>(M->getOrInsertGlobal(GVName, IRB.getInt64Ty()));
-  assert(FuncIdGV);
-  FuncIdGV->setConstant(false);
-  FuncIdGV->setLinkage(GlobalValue::WeakAnyLinkage);
-  FuncIdGV->setInitializer(IRB.getInt64(CsiCallsiteUnknownTargetId));
+    assert(FuncIdGV);
+    FuncIdGV->setConstant(false);
+    FuncIdGV->setLinkage(GlobalValue::WeakAnyLinkage);
+    FuncIdGV->setInitializer(IRB.getInt64(CsiCallsiteUnknownTargetId));
+    FuncId = IRB.CreateLoad(FuncIdGV);
+  } else {
+    // Unknown targets (i.e. indirect calls) are always unknown.
+    FuncId = IRB.getInt64(CsiCallsiteUnknownTargetId);
+  }
+  assert(FuncId != NULL);
 
-  Value *FuncId = IRB.CreateLoad(FuncIdGV);
   uint64_t Prop = 0;
   Instruction *Call = IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
   setInstrumentationDebugLoc(I, Call);
@@ -774,9 +783,10 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
       } else if (isa<ReturnInst>(I)) {
         ReturnInstructions.push_back(&I);
       } else if (isa<CallInst>(I) || isa<InvokeInst>(I)) {
-        Callsites.push_back(&I);
         if (isa<MemIntrinsic>(I)) {
           MemIntrinsics.push_back(&I);
+        } else {
+          Callsites.push_back(&I);
         }
       }
     }
