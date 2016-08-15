@@ -361,28 +361,28 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
 void ComprehensiveStaticInstrumentation::initializeFuncHooks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   CsiFuncEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), nullptr));
+      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
   CsiFuncExit = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_func_exit", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeBasicBlockHooks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_bb_entry", IRB.getVoidTy(), IRB.getInt64Ty(), nullptr));
+      "__csi_bb_entry", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
   CsiBBExit = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_bb_exit", IRB.getVoidTy(), IRB.getInt64Ty(), nullptr));
+      "__csi_bb_exit", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeCallsiteHooks(Module &M) {
   IRBuilder<> IRB(M.getContext());
   CsiBeforeCallsite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_call", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
   CsiAfterCallsite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_call", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeLoadStoreHooks(Module &M) {
@@ -506,13 +506,14 @@ void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   IRBuilder<> IRB(&*BB.getFirstInsertionPt());
   uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
+  uint64_t Prop = 0;
 
-  Instruction *Call = IRB.CreateCall(CsiBBEntry, {CsiId});
+  Instruction *Call = IRB.CreateCall(CsiBBEntry, {CsiId, IRB.getInt64(Prop)});
   setInstrumentationDebugLoc(BB, Call);
 
   TerminatorInst *TI = BB.getTerminator();
   IRB.SetInsertPoint(TI);
-  Call = IRB.CreateCall(CsiBBExit, {CsiId});
+  Call = IRB.CreateCall(CsiBBExit, {CsiId, IRB.getInt64(Prop)});
   setInstrumentationDebugLoc(BB, Call);
 }
 
@@ -539,13 +540,14 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
   FuncIdGV->setInitializer(IRB.getInt64(CsiCallsiteUnknownTargetId));
 
   Value *FuncId = IRB.CreateLoad(FuncIdGV);
-  Instruction *Call = IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId});
+  uint64_t Prop = 0;
+  Instruction *Call = IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
   setInstrumentationDebugLoc(I, Call);
 
   BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
-  Call = IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId});
+  Call = IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
   setInstrumentationDebugLoc(I, Call);
 }
 
@@ -808,15 +810,16 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   // Instrument function entry/exit points.
   IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
 
+  uint64_t FuncEntryProp = 0, FuncExitProp = 0;
   Value *FuncId = FunctionFED.localToGlobalId(LocalId, IRB);
-  Instruction *Call = IRB.CreateCall(CsiFuncEntry, {FuncId});
+  Instruction *Call = IRB.CreateCall(CsiFuncEntry, {FuncId, IRB.getInt64(FuncEntryProp)});
   setInstrumentationDebugLoc(F, Call);
 
   for (Instruction *I : ReturnInstructions) {
     IRBuilder<> IRBRet(I);
     uint64_t ExitLocalId = FunctionExitFED.add(F);
     Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
-    Call = IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId});
+    Call = IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId, IRB.getInt64(FuncExitProp)});
     setInstrumentationDebugLoc(F, Call);
   }
 }

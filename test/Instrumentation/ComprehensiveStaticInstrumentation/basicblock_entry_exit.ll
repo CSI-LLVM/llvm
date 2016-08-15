@@ -21,24 +21,24 @@ entry:
 ; CHECK-NEXT: entry:
 ; CHECK: %2 = load i64, i64* @__csi_unit_bb_base_id
 ; CHECK-NEXT: %3 = add i64 %2, 0
-; CHECK-NEXT: call void @__csi_bb_entry(i64 %3)
+; CHECK-NEXT: call void @__csi_bb_entry(i64 %3, i64 0)
 ; CHECK: %retval = alloca i32, align 4
 ; CHECK: store i32 0, i32* %retval, align 4
 ; CHECK: %call = call i32 @foo()
-; CHECK: call void @__csi_bb_exit(i64 %3)
+; CHECK: call void @__csi_bb_exit(i64 %3, i64 0)
 ; CHECK: ret i32 %call
 
 ; CHECK: define internal i32 @foo()
 ; CHECK-NEXT: entry:
 ; CHECK: %2 = load i64, i64* @__csi_unit_bb_base_id
 ; CHECK: %3 = add i64 %2, 1
-; CHECK-NEXT: call void @__csi_bb_entry(i64 %3)
-; CHECK-NEXT: call void @__csi_bb_exit(i64 %3)
+; CHECK-NEXT: call void @__csi_bb_entry(i64 %3, i64 0)
+; CHECK-NEXT: call void @__csi_bb_exit(i64 %3, i64 0)
 ; CHECK: ret i32 1
 
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Top-level:
 
-; CHECK: declare void @__csi_bb_entry(i64)
-; CHECK: declare void @__csi_bb_exit(i64)
+; CHECK: declare void @__csi_bb_entry(i64, i64)
+; CHECK: declare void @__csi_bb_exit(i64, i64)
