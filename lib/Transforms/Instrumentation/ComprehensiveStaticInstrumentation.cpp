@@ -517,14 +517,10 @@ void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
   uint64_t Prop = 0;
-
-  Instruction *Call = IRB.CreateCall(CsiBBEntry, {CsiId, IRB.getInt64(Prop)});
-  setInstrumentationDebugLoc(BB, Call);
-
   TerminatorInst *TI = BB.getTerminator();
-  IRB.SetInsertPoint(TI);
-  Call = IRB.CreateCall(CsiBBExit, {CsiId, IRB.getInt64(Prop)});
-  setInstrumentationDebugLoc(BB, Call);
+
+  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiBBEntry, {CsiId, IRB.getInt64(Prop)});
+  insertConditionalHookCall(TI, CsiBBExit, {CsiId, IRB.getInt64(Prop)});
 }
 
 void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
@@ -794,10 +790,10 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   SmallVector<Instruction *, 8> ReturnInstructions;
   SmallVector<Instruction *, 8> MemIntrinsics;
   SmallVector<Instruction *, 8> Callsites;
+  std::vector<BasicBlock *> BasicBlocks;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
-  // Traverse all instructions in a function and insert instrumentation
-  // on load & store
+  // Compile lists of all instrumentation points before anything is modified.
   for (BasicBlock &BB : F) {
     SmallVector<Instruction *, 8> BBLoadsAndStores;
     for (Instruction &I : BB) {
@@ -814,19 +810,18 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
       }
     }
     computeLoadAndStoreProperties(LoadAndStoreProperties, BBLoadsAndStores);
+    BasicBlocks.push_back(&BB);
   }
 
 
   // Instrument basic blocks Note that we do this before other
   // instrumentation so that we put this at the beginning of the basic
   // block, and then the function entry call goes before the call to
-  // basic block entry. Additionally, the branches inserted for
-  // __csi_disable_instrumentation insert new basic blocks, which we
-  // don't want to instrument.
+  // basic block entry.
   uint64_t LocalId = FunctionFED.add(F);
   FuncOffsetMap[F.getName()] = LocalId;
-  for (BasicBlock &BB : F) {
-    instrumentBasicBlock(BB);
+  for (BasicBlock *BB : BasicBlocks) {
+    instrumentBasicBlock(*BB);
   }
 
   // Do this work in a separate loop after copying the iterators so that we
