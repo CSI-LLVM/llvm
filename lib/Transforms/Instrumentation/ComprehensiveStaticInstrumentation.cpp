@@ -444,17 +444,14 @@ void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(
     Instruction *I, Function *BeforeFn, Function *AfterFn, Value *CsiId,
     Type *AddrType, Value *Addr, int NumBytes, uint64_t Prop) {
   IRBuilder<> IRB(I);
-  Instruction *Call = IRB.CreateCall(BeforeFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
-              IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
-  setInstrumentationDebugLoc(I, Call);
+  insertConditionalHookCall(I, BeforeFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
+        IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
 
   BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
-
-  Call = IRB.CreateCall(AfterFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
-              IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
-  setInstrumentationDebugLoc(I, Call);
+  insertConditionalHookCall(&*Iter, AfterFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
+        IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
 }
 
 void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(

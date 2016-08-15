@@ -31,18 +31,18 @@ entry:
 ; CHECK-NEXT: store i1 false, i1* @__csi_disable_instrumentation
 ; CHECK-NEXT: br label %7
 
-; CHECK: <label>:22:
+; CHECK: <label>:30:
 ; CHECK-NEXT: %{{[0-9]+}} = load i1, i1* @__csi_disable_instrumentation
 ; CHECK-NEXT: %{{[0-9]+}} = icmp eq i1 %{{[0-9]+}}, false
-; CHECK-NEXT: br i1 %{{[0-9]+}}, label %25, label %26
+; CHECK-NEXT: br i1 %{{[0-9]+}}, label %33, label %34
 
-; CHECK: <label>:25:
+; CHECK: <label>:33:
 ; CHECK-NEXT: store i1 true, i1* @__csi_disable_instrumentation
 ; CHECK-NEXT: call void @__csi_bb_exit(i64 %{{[0-9]+}}, i64 0)
 ; CHECK-NEXT: store i1 false, i1* @__csi_disable_instrumentation
-; CHECK-NEXT: br label %26
+; CHECK-NEXT: br label %34
 
-; CHECK: <label>:26:
+; CHECK: <label>:34:
 ; CHECK-NEXT: %{{[0-9]+}} = load i64, i64* @__csi_unit_func_exit_base_id
 ; CHECK-NEXT: %{{[0-9]+}} = add i64 %{{[0-9]+}}, 0
 ; CHECK-NEXT: call void @__csi_func_exit(i64 %{{[0-9]+}}, i64 %{{[0-9]+}}, i64 0)
