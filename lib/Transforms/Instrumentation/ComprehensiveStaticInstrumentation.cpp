@@ -837,17 +837,14 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
 
   // Instrument function entry/exit points.
   IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
-
   uint64_t FuncEntryProp = 0, FuncExitProp = 0;
   Value *FuncId = FunctionFED.localToGlobalId(LocalId, IRB);
-  Instruction *Call = IRB.CreateCall(CsiFuncEntry, {FuncId, IRB.getInt64(FuncEntryProp)});
-  setInstrumentationDebugLoc(F, Call);
+  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiFuncEntry, {FuncId, IRB.getInt64(FuncEntryProp)});
 
   for (Instruction *I : ReturnInstructions) {
     IRBuilder<> IRBRet(I);
     uint64_t ExitLocalId = FunctionExitFED.add(F);
     Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
-    Call = IRBRet.CreateCall(CsiFuncExit, {ExitCsiId, FuncId, IRB.getInt64(FuncExitProp)});
-    setInstrumentationDebugLoc(F, Call);
+    insertConditionalHookCall(I, CsiFuncExit, {ExitCsiId, FuncId, IRBRet.getInt64(FuncExitProp)});
   }
 }
