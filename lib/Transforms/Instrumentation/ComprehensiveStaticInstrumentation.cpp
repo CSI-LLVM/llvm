@@ -214,6 +214,12 @@ private:
   void instrumentFunction(Function &F);
   /// @}
 
+  /// Insert a conditional call to the given hook function before the
+  /// given instruction. The condition is based on the value of
+  /// __csi_disable_instrumentation.
+  void insertConditionalHookCall(Instruction *I, Function *HookFunction,
+                                 ArrayRef<Value *> HookArgs);
+
   /// Return true if the given function should not be instrumented.
   bool shouldNotInstrumentFunction(Function &F);
 
@@ -552,28 +558,25 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
     FuncId = IRB.getInt64(CsiCallsiteUnknownTargetId);
   }
   assert(FuncId != NULL);
+  uint64_t Prop = 0;
+  insertConditionalHookCall(I, CsiBeforeCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
 
+  BasicBlock::iterator Iter(I);
+  Iter++;
+  insertConditionalHookCall(&*Iter, CsiAfterCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
+}
+
+void ComprehensiveStaticInstrumentation::insertConditionalHookCall(Instruction *I, Function *HookFunction, ArrayRef<Value *> HookArgs) {
+  IRBuilder<> IRB(I);
   Value *Cond = IRB.CreateICmpEQ(IRB.CreateLoad(DisableInstrGV), IRB.getInt1(false));
   TerminatorInst *TI = SplitBlockAndInsertIfThen(Cond, I, false);
   IRB.SetInsertPoint(TI);
   IRB.CreateStore(IRB.getInt1(true), DisableInstrGV);
-  uint64_t Prop = 0;
-  Instruction *Call = IRB.CreateCall(CsiBeforeCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
+  Instruction *Call = IRB.CreateCall(HookFunction, HookArgs);
   setInstrumentationDebugLoc(I, Call);
   IRB.CreateStore(IRB.getInt1(false), DisableInstrGV);
-
-  BasicBlock::iterator Iter(I);
-  Iter++;
-  IRB.SetInsertPoint(&*Iter);
-  Cond = IRB.CreateICmpEQ(IRB.CreateLoad(DisableInstrGV), IRB.getInt1(false));
-  TI = SplitBlockAndInsertIfThen(Cond, &*IRB.GetInsertPoint(), false);
-  IRB.SetInsertPoint(TI);
-  IRB.CreateStore(IRB.getInt1(true), DisableInstrGV);
-  Call = IRB.CreateCall(CsiAfterCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
-  IRB.CreateStore(IRB.getInt1(false), DisableInstrGV);
-
-  setInstrumentationDebugLoc(I, Call);
 }
+
 
 void ComprehensiveStaticInstrumentation::initializeFEDTables(Module &M) {
   FunctionFED = FrontEndDataTable(M, CsiFunctionBaseIdName);
