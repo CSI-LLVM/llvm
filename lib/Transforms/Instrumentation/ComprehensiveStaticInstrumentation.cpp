@@ -255,7 +255,7 @@ const char *ComprehensiveStaticInstrumentation::getPassName() const {
   return "ComprehensiveStaticInstrumentation";
 }
 
-ModulePass *llvm::createComprehensiveStaticInstrumentationPass() {
+ModulePass *llvm::createComprehensiveStaticInstrumentationPass(const std::string &ToolBC) {
   return new ComprehensiveStaticInstrumentation();
 }
 

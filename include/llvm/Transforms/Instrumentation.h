@@ -164,8 +164,8 @@ inline ModulePass *createDataFlowSanitizerPassForJIT(
 #endif
 
 // Insert ComprehensiveStaticInstrumentation instrumentation
-ModulePass *createComprehensiveStaticInstrumentationPass();
-    
+ModulePass *createComprehensiveStaticInstrumentationPass(const std::string &ToolBC);
+
 // BoundsChecking - This pass instruments the code to perform run-time bounds
 // checking on loads, stores, and other memory intrinsics.
 FunctionPass *createBoundsCheckingPass();
