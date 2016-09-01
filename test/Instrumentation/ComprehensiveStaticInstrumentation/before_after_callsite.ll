@@ -32,7 +32,7 @@ entry:
 
 ; CHECK: <label>:29:
 ; CHECK-NEXT: store i1 true, i1* @__csi_disable_instrumentation
-; CHECK-NEXT: call void @__csi_before_call(i64 %{{[0-9]+}}, i64 %{{[0-9]+}}, i64 0)
+; CHECK-NEXT: call void @__csi_before_call(i64 %{{[0-9]+}}, i64 %{{[0-9]+}}, { i1, i63 } zeroinitializer)
 ; CHECK-NEXT: store i1 false, i1* @__csi_disable_instrumentation
 ; CHECK: br label %30
 
@@ -44,12 +44,12 @@ entry:
 
 ; CHECK: <label>:33:
 ; CHECK-NEXT: store i1 true, i1* @__csi_disable_instrumentation
-; CHECK-NEXT: call void @__csi_after_call(i64 %{{[0-9]+}}, i64 %{{[0-9]+}}, i64 0)
+; CHECK-NEXT: call void @__csi_after_call(i64 %{{[0-9]+}}, i64 %{{[0-9]+}}, { i1, i63 } zeroinitializer)
 ; CHECK-NEXT: store i1 false, i1* @__csi_disable_instrumentation
 ; CHECK-NEXT: br label %34
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Top-level:
 
-; CHECK: declare void @__csi_before_call(i64, i64, i64)
-; CHECK: declare void @__csi_after_call(i64, i64, i64)
+; CHECK: declare void @__csi_before_call(i64, i64, { i1, i63 })
+; CHECK: declare void @__csi_after_call(i64, i64, { i1, i63 })

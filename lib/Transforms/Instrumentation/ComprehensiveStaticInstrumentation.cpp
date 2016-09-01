@@ -147,6 +147,7 @@ private:
   std::map<Value *, uint64_t> ValueToLocalIdMap;
 
   /// Create a struct type to match the "struct SourceLocation" type.
+  /// (and the source_loc_t type in csi.h).
   static StructType *getSourceLocStructType(LLVMContext &C);
 
   /// Append the debug information to the table, assigning it the next
@@ -163,6 +164,30 @@ private:
   ///
   /// \returns The new local ID of the DILocation.
   uint64_t add(int32_t Line, StringRef File);
+};
+
+/// Represents a csi_prop_t value passed to hooks.
+class CsiProperty {
+public:
+  CsiProperty() {
+    PropValue.LoadReadBeforeWriteInBB = false;
+  }
+
+  /// Return the Type of a property.
+  static StructType *getType(LLVMContext &C);
+
+  /// Return a Value holding this property.
+  Value *getValue(LLVMContext &C) const;
+
+  /// Set the value of the LoadReadBeforeWriteInBB property.
+  void setLoadReadBeforeWriteInBB(bool v);
+private:
+  typedef struct {
+    bool LoadReadBeforeWriteInBB;
+  } Property;
+
+  /// The underlying values of the properties.
+  Property PropValue;
 };
 
 /// The Comprehensive Static Instrumentation pass.
@@ -196,7 +221,7 @@ private:
 
   /// Compute CSI properties on the given ordered list of loads and stores.
   void computeLoadAndStoreProperties(
-      SmallVectorImpl<std::pair<Instruction *, uint64_t>>
+      SmallVectorImpl<std::pair<Instruction *, CsiProperty>>
           &LoadAndStoreProperties,
       SmallVectorImpl<Instruction *> &BBLoadsAndStores);
 
@@ -205,8 +230,8 @@ private:
   void addLoadStoreInstrumentation(Instruction *I, Function *BeforeFn,
                                    Function *AfterFn, Value *CsiId,
                                    Type *AddrType, Value *Addr, int NumBytes,
-                                   uint64_t Prop);
-  void instrumentLoadOrStore(Instruction *I, uint64_t Prop,
+                                   CsiProperty Prop);
+  void instrumentLoadOrStore(Instruction *I, CsiProperty Prop,
                              const DataLayout &DL);
   void instrumentMemIntrinsic(Instruction *I);
   void instrumentCallsite(Instruction *I);
@@ -368,53 +393,72 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
   return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
 }
 
+StructType *CsiProperty::getType(LLVMContext &C) {
+  // Must match the definition of csi_prop_t in csi.h
+  return StructType::get(IntegerType::get(C, 1), IntegerType::get(C, 63), nullptr);
+}
+
+Value *CsiProperty::getValue(LLVMContext &C) const {
+  return ConstantStruct::get(getType(C),
+    ConstantInt::get(IntegerType::get(C, 1), PropValue.LoadReadBeforeWriteInBB),
+    ConstantInt::get(IntegerType::get(C, 63), 0),
+    nullptr);
+}
+
+void CsiProperty::setLoadReadBeforeWriteInBB(bool v) {
+  PropValue.LoadReadBeforeWriteInBB = v;
+}
+
 void ComprehensiveStaticInstrumentation::initializeFuncHooks(Module &M) {
-  IRBuilder<> IRB(M.getContext());
+  LLVMContext &C = M.getContext();
+  IRBuilder<> IRB(C);
   CsiFuncEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), CsiProperty::getType(C), nullptr));
   CsiFuncExit = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_func_exit", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), CsiProperty::getType(C), nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeBasicBlockHooks(Module &M) {
-  IRBuilder<> IRB(M.getContext());
+  LLVMContext &C = M.getContext();
+  IRBuilder<> IRB(C);
   CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_bb_entry", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+      "__csi_bb_entry", IRB.getVoidTy(), IRB.getInt64Ty(), CsiProperty::getType(C), nullptr));
   CsiBBExit = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_bb_exit", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+      "__csi_bb_exit", IRB.getVoidTy(), IRB.getInt64Ty(), CsiProperty::getType(C), nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeCallsiteHooks(Module &M) {
-  IRBuilder<> IRB(M.getContext());
+  LLVMContext &C = M.getContext();
+  IRBuilder<> IRB(C);
   CsiBeforeCallsite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_call", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), CsiProperty::getType(C), nullptr));
   CsiAfterCallsite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_call", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), CsiProperty::getType(C), nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeLoadStoreHooks(Module &M) {
-
-  IRBuilder<> IRB(M.getContext());
+  LLVMContext &C = M.getContext();
+  IRBuilder<> IRB(C);
   Type *RetType = IRB.getVoidTy();
   Type *AddrType = IRB.getInt8PtrTy();
   Type *NumBytesType = IRB.getInt32Ty();
 
   CsiBeforeRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_load", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
+                            AddrType, NumBytesType, CsiProperty::getType(C), nullptr));
   CsiAfterRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_load", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
+                            AddrType, NumBytesType, CsiProperty::getType(C), nullptr));
 
   CsiBeforeWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_store", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
+                            AddrType, NumBytesType, CsiProperty::getType(C), nullptr));
   CsiAfterWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_store", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
+                            AddrType, NumBytesType, CsiProperty::getType(C), nullptr));
 
   MemmoveFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memmove", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
@@ -442,20 +486,20 @@ int ComprehensiveStaticInstrumentation::getNumBytesAccessed(
 
 void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(
     Instruction *I, Function *BeforeFn, Function *AfterFn, Value *CsiId,
-    Type *AddrType, Value *Addr, int NumBytes, uint64_t Prop) {
+    Type *AddrType, Value *Addr, int NumBytes, CsiProperty Prop) {
   IRBuilder<> IRB(I);
   insertConditionalHookCall(I, BeforeFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
-        IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
+        IRB.getInt32(NumBytes), Prop.getValue(IRB.getContext())});
 
   BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
   insertConditionalHookCall(&*Iter, AfterFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
-        IRB.getInt32(NumBytes), IRB.getInt64(Prop)});
+        IRB.getInt32(NumBytes), Prop.getValue(IRB.getContext())});
 }
 
 void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(
-    Instruction *I, uint64_t Prop, const DataLayout &DL) {
+    Instruction *I, CsiProperty Prop, const DataLayout &DL) {
   IRBuilder<> IRB(I);
   bool IsWrite = isa<StoreInst>(I);
   Value *Addr = IsWrite ? cast<StoreInst>(I)->getPointerOperand()
@@ -511,13 +555,14 @@ void ComprehensiveStaticInstrumentation::instrumentMemIntrinsic(
 
 void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   IRBuilder<> IRB(&*BB.getFirstInsertionPt());
+  LLVMContext &C = IRB.getContext();
   uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
-  uint64_t Prop = 0;
+  CsiProperty Prop;
   TerminatorInst *TI = BB.getTerminator();
 
-  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiBBEntry, {CsiId, IRB.getInt64(Prop)});
-  insertConditionalHookCall(TI, CsiBBExit, {CsiId, IRB.getInt64(Prop)});
+  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiBBEntry, {CsiId, Prop.getValue(C)});
+  insertConditionalHookCall(TI, CsiBBExit, {CsiId, Prop.getValue(C)});
 }
 
 void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
@@ -533,6 +578,7 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
   }
 
   IRBuilder<> IRB(I);
+  LLVMContext &C = IRB.getContext();
   uint64_t LocalId = CallsiteFED.add(*I);
   Value *CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
   Value *FuncId = NULL;
@@ -551,12 +597,12 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
     FuncId = IRB.getInt64(CsiCallsiteUnknownTargetId);
   }
   assert(FuncId != NULL);
-  uint64_t Prop = 0;
-  insertConditionalHookCall(I, CsiBeforeCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
+  CsiProperty Prop;
+  insertConditionalHookCall(I, CsiBeforeCallsite, {CallsiteId, FuncId, Prop.getValue(C)});
 
   BasicBlock::iterator Iter(I);
   Iter++;
-  insertConditionalHookCall(&*Iter, CsiAfterCallsite, {CallsiteId, FuncId, IRB.getInt64(Prop)});
+  insertConditionalHookCall(&*Iter, CsiAfterCallsite, {CallsiteId, FuncId, Prop.getValue(C)});
 }
 
 void ComprehensiveStaticInstrumentation::insertConditionalHookCall(Instruction *I, Function *HookFunction, ArrayRef<Value *> HookArgs) {
@@ -742,7 +788,7 @@ bool ComprehensiveStaticInstrumentation::shouldNotInstrumentFunction(
 }
 
 void ComprehensiveStaticInstrumentation::computeLoadAndStoreProperties(
-    SmallVectorImpl<std::pair<Instruction *, uint64_t>> &LoadAndStoreProperties,
+    SmallVectorImpl<std::pair<Instruction *, CsiProperty>> &LoadAndStoreProperties,
     SmallVectorImpl<Instruction *> &BBLoadsAndStores) {
   SmallSet<Value *, 8> WriteTargets;
 
@@ -751,14 +797,15 @@ void ComprehensiveStaticInstrumentation::computeLoadAndStoreProperties(
            E = BBLoadsAndStores.rend();
        It != E; ++It) {
     Instruction *I = *It;
+    CsiProperty Prop;
     if (StoreInst *Store = dyn_cast<StoreInst>(I)) {
       WriteTargets.insert(Store->getPointerOperand());
-      LoadAndStoreProperties.push_back(std::make_pair(I, 0));
+      LoadAndStoreProperties.push_back(std::make_pair(I, Prop));
     } else {
       LoadInst *Load = cast<LoadInst>(I);
       Value *Addr = Load->getPointerOperand();
       bool HasBeenSeen = WriteTargets.count(Addr) > 0;
-      uint64_t Prop = HasBeenSeen ? 1 : 0;
+      Prop.setLoadReadBeforeWriteInBB(HasBeenSeen);
       LoadAndStoreProperties.push_back(std::make_pair(I, Prop));
     }
   }
@@ -783,7 +830,7 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
     return;
   }
 
-  SmallVector<std::pair<Instruction *, uint64_t>, 8> LoadAndStoreProperties;
+  SmallVector<std::pair<Instruction *, CsiProperty>, 8> LoadAndStoreProperties;
   SmallVector<Instruction *, 8> ReturnInstructions;
   SmallVector<Instruction *, 8> MemIntrinsics;
   SmallVector<Instruction *, 8> Callsites;
@@ -823,7 +870,7 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
 
   // Do this work in a separate loop after copying the iterators so that we
   // aren't modifying the list as we're iterating.
-  for (std::pair<Instruction *, uint64_t> p : LoadAndStoreProperties) {
+  for (std::pair<Instruction *, CsiProperty> p : LoadAndStoreProperties) {
     instrumentLoadOrStore(p.first, p.second, DL);
   }
 
@@ -837,14 +884,15 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
 
   // Instrument function entry/exit points.
   IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
-  uint64_t FuncEntryProp = 0, FuncExitProp = 0;
+  LLVMContext &C = IRB.getContext();
+  CsiProperty FuncEntryProp, FuncExitProp;
   Value *FuncId = FunctionFED.localToGlobalId(LocalId, IRB);
-  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiFuncEntry, {FuncId, IRB.getInt64(FuncEntryProp)});
+  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiFuncEntry, {FuncId, FuncEntryProp.getValue(C)});
 
   for (Instruction *I : ReturnInstructions) {
     IRBuilder<> IRBRet(I);
     uint64_t ExitLocalId = FunctionExitFED.add(F);
     Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
-    insertConditionalHookCall(I, CsiFuncExit, {ExitCsiId, FuncId, IRBRet.getInt64(FuncExitProp)});
+    insertConditionalHookCall(I, CsiFuncExit, {ExitCsiId, FuncId, FuncExitProp.getValue(IRBRet.getContext())});
   }
 }

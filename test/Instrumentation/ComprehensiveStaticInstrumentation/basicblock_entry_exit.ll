@@ -27,7 +27,7 @@ entry:
 
 ; CHECK: <label>:10:
 ; CHECK-NEXT: store i1 true, i1* @__csi_disable_instrumentation
-; CHECK-NEXT: call void @__csi_bb_entry(i64 %{{[0-9]+}}, i64 0)
+; CHECK-NEXT: call void @__csi_bb_entry(i64 %{{[0-9]+}}, { i1, i63 } zeroinitializer)
 ; CHECK-NEXT: store i1 false, i1* @__csi_disable_instrumentation
 ; CHECK-NEXT: br label %11
 
@@ -38,7 +38,7 @@ entry:
 
 ; CHECK: <label>:37:
 ; CHECK-NEXT: store i1 true, i1* @__csi_disable_instrumentation
-; CHECK-NEXT: call void @__csi_bb_exit(i64 %{{[0-9]+}}, i64 0)
+; CHECK-NEXT: call void @__csi_bb_exit(i64 %{{[0-9]+}}, { i1, i63 } zeroinitializer)
 ; CHECK-NEXT: store i1 false, i1* @__csi_disable_instrumentation
 ; CHECK-NEXT: br label %38
 
@@ -52,7 +52,7 @@ entry:
 
 ; CHECK: <label>:10:
 ; CHECK-NEXT: store i1 true, i1* @__csi_disable_instrumentation
-; CHECK-NEXT: call void @__csi_bb_entry(i64 %{{[0-9]+}}, i64 0)
+; CHECK-NEXT: call void @__csi_bb_entry(i64 %{{[0-9]+}}, { i1, i63 } zeroinitializer)
 ; CHECK-NEXT: store i1 false, i1* @__csi_disable_instrumentation
 ; CHECK-NEXT: br label %11
 
@@ -63,12 +63,12 @@ entry:
 
 ; CHECK: <label>:14:
 ; CHECK-NEXT: store i1 true, i1* @__csi_disable_instrumentation
-; CHECK-NEXT: call void @__csi_bb_exit(i64 %{{[0-9]+}}, i64 0)
+; CHECK-NEXT: call void @__csi_bb_exit(i64 %{{[0-9]+}}, { i1, i63 } zeroinitializer)
 ; CHECK-NEXT: store i1 false, i1* @__csi_disable_instrumentation
 ; CHECK-NEXT: br label %15
 
 ;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;;
 ; Top-level:
 
-; CHECK: declare void @__csi_bb_entry(i64, i64)
-; CHECK: declare void @__csi_bb_exit(i64, i64)
+; CHECK: declare void @__csi_bb_entry(i64, { i1, i63 })
+; CHECK: declare void @__csi_bb_exit(i64, { i1, i63 })
