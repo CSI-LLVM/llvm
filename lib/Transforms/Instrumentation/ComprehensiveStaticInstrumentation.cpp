@@ -621,13 +621,13 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
 
 void ComprehensiveStaticInstrumentation::insertConditionalHookCall(Instruction *I, Function *HookFunction, ArrayRef<Value *> HookArgs) {
   IRBuilder<> IRB(I);
-  Value *Cond = IRB.CreateICmpEQ(IRB.CreateLoad(DisableInstrGV), IRB.getInt1(false));
-  TerminatorInst *TI = SplitBlockAndInsertIfThen(Cond, I, false);
-  IRB.SetInsertPoint(TI);
-  IRB.CreateStore(IRB.getInt1(true), DisableInstrGV);
+  // Value *Cond = IRB.CreateICmpEQ(IRB.CreateLoad(DisableInstrGV), IRB.getInt1(false));
+  // TerminatorInst *TI = SplitBlockAndInsertIfThen(Cond, I, false);
+  // IRB.SetInsertPoint(TI);
+  // IRB.CreateStore(IRB.getInt1(true), DisableInstrGV);
   Instruction *Call = IRB.CreateCall(HookFunction, HookArgs);
   setInstrumentationDebugLoc(I, Call);
-  IRB.CreateStore(IRB.getInt1(false), DisableInstrGV);
+  // IRB.CreateStore(IRB.getInt1(false), DisableInstrGV);
 }
 
 
