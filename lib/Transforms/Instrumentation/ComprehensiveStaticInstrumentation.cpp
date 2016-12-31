@@ -266,7 +266,7 @@ private:
   CallGraph *CG;
   Function *MemmoveFn, *MemcpyFn, *MemsetFn;
   Function *InitCallsiteToFunction;
-  GlobalVariable *DisableInstrGV;
+  // GlobalVariable *DisableInstrGV;
   Type *IntptrTy;
   std::map<std::string, uint64_t> FuncOffsetMap;
 }; // struct ComprehensiveStaticInstrumentation
@@ -710,10 +710,14 @@ void ComprehensiveStaticInstrumentation::initializeCsi(Module &M) {
 
   CG = &getAnalysis<CallGraphWrapperPass>().getCallGraph();
 
+  /*
+  The runtime declares this as a __thread var --- need to change this decl generation
+    or the tool won't compile
   DisableInstrGV = new GlobalVariable(M, IntegerType::get(M.getContext(), 1), false,
                                       GlobalValue::ExternalLinkage, nullptr,
                                       CsiDisableInstrumentationName, nullptr,
                                       GlobalValue::GeneralDynamicTLSModel, 0, true);
+  */
 }
 
 // Create a struct type to match the unit_fed_entry_t type in csirt.c.
