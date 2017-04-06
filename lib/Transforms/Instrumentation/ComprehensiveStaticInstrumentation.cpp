@@ -605,11 +605,13 @@ void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
 }
 
 void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
+  bool IsInvoke = false;
   Function *Called = NULL;
   if (CallInst *CI = dyn_cast<CallInst>(I)) {
     Called = CI->getCalledFunction();
   } else if (InvokeInst *II = dyn_cast<InvokeInst>(I)) {
     Called = II->getCalledFunction();
+    IsInvoke = true;
   }
 
   if (Called && Called->getName().startswith("llvm.dbg")) {
@@ -621,11 +623,11 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
   uint64_t LocalId = CallsiteFED.add(*I);
   Value *CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
   Value *FuncId = NULL;
+  GlobalVariable *FuncIdGV = NULL;
   if (Called) {
     Module *M = I->getParent()->getParent()->getParent();
     std::string GVName = CsiFuncIdVariablePrefix + Called->getName().str();
-    GlobalVariable *FuncIdGV =
-      dyn_cast<GlobalVariable>(M->getOrInsertGlobal(GVName, IRB.getInt64Ty()));
+    FuncIdGV = dyn_cast<GlobalVariable>(M->getOrInsertGlobal(GVName, IRB.getInt64Ty()));
     assert(FuncIdGV);
     FuncIdGV->setConstant(false);
     FuncIdGV->setLinkage(GlobalValue::WeakAnyLinkage);
@@ -641,10 +643,37 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
   insertConditionalHookCall(I, CsiBeforeCallsite, {CallsiteId, FuncId, PropVal});
 
   BasicBlock::iterator Iter(I);
-  Iter++;
-  IRB.SetInsertPoint(&*Iter);
-  PropVal = Prop.getValue(IRB);
-  insertConditionalHookCall(&*Iter, CsiAfterCallsite, {CallsiteId, FuncId, PropVal});
+  if (IsInvoke) {
+    // There are two "after" positions for invokes: the normal block
+    // and the exception block. This also means we have to recompute
+    // the callsite and function IDs in each basic block so that we
+    // can use it for the after hook.
+
+    // TODO: Do we want the "after" hook for this callsite to come
+    // before or after the BB entry hook? Currently it is inserted
+    // before BB entry because instrumentCallsite is called after
+    // instrumentBasicBlock.
+    InvokeInst *II = dyn_cast<InvokeInst>(I);
+    BasicBlock *NormalBB = II->getNormalDest();
+    IRB.SetInsertPoint(&*NormalBB->getFirstInsertionPt());
+    CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
+    if (FuncIdGV != NULL) FuncId = IRB.CreateLoad(FuncIdGV);
+    PropVal = Prop.getValue(IRB);
+    insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiAfterCallsite, {CallsiteId, FuncId, PropVal});
+    
+    BasicBlock *UnwindBB = II->getUnwindDest();
+    IRB.SetInsertPoint(&*UnwindBB->getFirstInsertionPt());
+    CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
+    if (FuncIdGV != NULL) FuncId = IRB.CreateLoad(FuncIdGV);
+    PropVal = Prop.getValue(IRB);
+    insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiAfterCallsite, {CallsiteId, FuncId, PropVal});
+  } else {
+    // Simple call instruction; there is only one "after" position.
+    Iter++;
+    IRB.SetInsertPoint(&*Iter);
+    PropVal = Prop.getValue(IRB);
+    insertConditionalHookCall(&*Iter, CsiAfterCallsite, {CallsiteId, FuncId, PropVal});
+  }
 }
 
 void ComprehensiveStaticInstrumentation::insertConditionalHookCall(Instruction *I, Function *HookFunction, ArrayRef<Value *> HookArgs) {
