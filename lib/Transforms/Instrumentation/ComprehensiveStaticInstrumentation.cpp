@@ -431,17 +431,12 @@ StructType *CsiProperty::getType(LLVMContext &C) {
 
 Value *CsiProperty::getValue(IRBuilder<> IRB) const {
   LLVMContext &C = IRB.getContext();
-  Constant *Value = ConstantStruct::get(getType(C),
+  StructType *StructTy = getType(C);
+  Constant *Value = ConstantStruct::get(StructTy,
         ConstantInt::get(IntegerType::get(C, 1), PropValue.LoadReadBeforeWriteInBB),
         ConstantInt::get(IntegerType::get(C, 63), 0),
         nullptr);
-  Type *StructTy = getType(C);
-  Type *Int64PtrTy = PointerType::get(IntegerType::get(C, 64), 0);
-  AllocaInst *AI = IRB.CreateAlloca(StructTy);
-  IRB.CreateStore(Value, AI);
-  return IRB.CreateLoad(IRB.CreateBitCast(IRB.CreateInBoundsGEP(AI,
-                                                                {IRB.getInt32(0), IRB.getInt32(0)}),
-                                          Int64PtrTy));
+  return Value;
 }
 
 void CsiProperty::setLoadReadBeforeWriteInBB(bool v) {
@@ -451,53 +446,57 @@ void CsiProperty::setLoadReadBeforeWriteInBB(bool v) {
 void ComprehensiveStaticInstrumentation::initializeFuncHooks(Module &M) {
   LLVMContext &C = M.getContext();
   IRBuilder<> IRB(C);
+  Type *PropertyTy = CsiProperty::getType(C);
   CsiFuncEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), PropertyTy, nullptr));
   CsiFuncExit = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_func_exit", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), PropertyTy, nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeBasicBlockHooks(Module &M) {
   LLVMContext &C = M.getContext();
   IRBuilder<> IRB(C);
+  Type *PropertyTy = CsiProperty::getType(C);
   CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_bb_entry", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+      "__csi_bb_entry", IRB.getVoidTy(), IRB.getInt64Ty(), PropertyTy, nullptr));
   CsiBBExit = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_bb_exit", IRB.getVoidTy(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+      "__csi_bb_exit", IRB.getVoidTy(), IRB.getInt64Ty(), PropertyTy, nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeCallsiteHooks(Module &M) {
   LLVMContext &C = M.getContext();
   IRBuilder<> IRB(C);
+  Type *PropertyTy = CsiProperty::getType(C);
   CsiBeforeCallsite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_call", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), PropertyTy, nullptr));
   CsiAfterCallsite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_call", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), IRB.getInt64Ty(), nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(), PropertyTy, nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeLoadStoreHooks(Module &M) {
   LLVMContext &C = M.getContext();
   IRBuilder<> IRB(C);
+  Type *PropertyTy = CsiProperty::getType(C);
   Type *RetType = IRB.getVoidTy();
   Type *AddrType = IRB.getInt8PtrTy();
   Type *NumBytesType = IRB.getInt32Ty();
 
   CsiBeforeRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_load", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
+                            AddrType, NumBytesType, PropertyTy, nullptr));
   CsiAfterRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_load", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
+                            AddrType, NumBytesType, PropertyTy, nullptr));
 
   CsiBeforeWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_store", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
+                            AddrType, NumBytesType, PropertyTy, nullptr));
   CsiAfterWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_store", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, IRB.getInt64Ty(), nullptr));
+                            AddrType, NumBytesType, PropertyTy, nullptr));
 
   MemmoveFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memmove", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
