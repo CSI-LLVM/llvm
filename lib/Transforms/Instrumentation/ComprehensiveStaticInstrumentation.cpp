@@ -321,7 +321,10 @@ uint64_t FrontEndDataTable::getId(Value *V) {
 Value *FrontEndDataTable::localToGlobalId(uint64_t LocalId,
                                           IRBuilder<> IRB) const {
   assert(BaseId);
-  Value *Base = IRB.CreateLoad(BaseId);
+  LLVMContext &C = IRB.getContext();
+  LoadInst *Base = IRB.CreateLoad(BaseId);
+  MDNode *MD = llvm::MDNode::get(C, None);
+  Base->setMetadata(LLVMContext::MD_invariant_load, MD);
   Value *Offset = IRB.getInt64(LocalId);
   return IRB.CreateAdd(Base, Offset);
 }
@@ -660,7 +663,7 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
     if (FuncIdGV != NULL) FuncId = IRB.CreateLoad(FuncIdGV);
     PropVal = Prop.getValue(IRB);
     insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiAfterCallsite, {CallsiteId, FuncId, PropVal});
-    
+
     BasicBlock *UnwindBB = II->getUnwindDest();
     IRB.SetInsertPoint(&*UnwindBB->getFirstInsertionPt());
     CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
