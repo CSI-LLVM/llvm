@@ -1,7 +1,21 @@
+//===-- ComprehensiveStaticInstrumentation.cpp - instrumentation hooks ----===//
+//
+//                     The LLVM Compiler Infrastructure
+//
+// TODO: License
+//===----------------------------------------------------------------------===//
+//
+// This file is part of CSI, a framework that provides comprehensive static
+// instrumentation.
+//
+//===----------------------------------------------------------------------===//
+
 #include "llvm/ADT/SmallSet.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/Analysis/CallGraph.h"
+#include "llvm/Analysis/CaptureTracking.h"
+#include "llvm/Analysis/ValueTracking.h"
 #include "llvm/IR/DataLayout.h"
 #include "llvm/IR/DebugInfo.h"
 #include "llvm/IR/IRBuilder.h"
@@ -167,28 +181,254 @@ private:
   uint64_t add(int32_t Line, StringRef File, StringRef Name = "");
 };
 
-/// Represents a csi_prop_t value passed to hooks.
+/// Represents a property value passed to hooks.
 class CsiProperty {
 public:
-  CsiProperty() {
-    PropValue.LoadReadBeforeWriteInBB = false;
+  CsiProperty() {}
+
+  /// Return the coerced type of a property.
+  ///
+  /// TODO: Right now, this function simply returns a 64-bit integer.  Although
+  /// this solution works for x86_64, it should be generalized to handle other
+  /// architectures in the future.
+  static Type *getCoercedType(LLVMContext &C, StructType *Ty) {
+    // Must match the definition of property type in csi.h
+    // return StructType::get(IntegerType::get(C, 64),
+    //                        nullptr);
+    // We return an integer type, rather than a struct type, to deal with x86_64
+    // type coercion on struct bit fields.
+    return IntegerType::get(C, 64);
+  }
+
+  /// Return a constant value holding this property.
+  virtual Constant *getValueImpl(LLVMContext &C) const = 0;
+
+  Constant *getValue(IRBuilder<> &IRB) const {
+    return getValueImpl(IRB.getContext());
+  }
+};
+
+class CsiFuncProperty : public CsiProperty {
+public:
+  CsiFuncProperty() {}
+
+  /// Return the Type of a property.
+  static Type *getType(LLVMContext &C) {
+    // Must match the definition of property type in csi.h
+    return CsiProperty::getCoercedType(
+        C, StructType::get(IntegerType::get(C, 64), nullptr));
+  }
+  /// Return a constant value holding this property.
+  Constant *getValueImpl(LLVMContext &C) const override {
+    // Must match the definition of property type in csi.h
+    // StructType *StructTy = getType(C);
+    // return ConstantStruct::get(StructTy,
+    //                            ConstantInt::get(IntegerType::get(C, 64), 0),
+    //                            nullptr);
+    // TODO: This solution works for x86, but should be generalized to support
+    // other architectures in the future.
+    return ConstantInt::get(getType(C), 0);
+  }
+};
+
+class CsiFuncExitProperty : public CsiProperty {
+public:
+  CsiFuncExitProperty() {}
+
+  /// Return the Type of a property.
+  static Type *getType(LLVMContext &C) {
+    // Must match the definition of property type in csi.h
+    return CsiProperty::getCoercedType(
+        C, StructType::get(IntegerType::get(C, 64), nullptr));
+  }
+  /// Return a constant value holding this property.
+  Constant *getValueImpl(LLVMContext &C) const override {
+    // Must match the definition of property type in csi.h
+    // StructType *StructTy = getType(C);
+    // return ConstantStruct::get(StructTy,
+    //                            ConstantInt::get(IntegerType::get(C, 64), 0),
+    //                            nullptr);
+    // TODO: This solution works for x86, but should be generalized to support
+    // other architectures in the future.
+    return ConstantInt::get(getType(C), 0);
+  }
+};
+
+class CsiBBProperty : public CsiProperty {
+public:
+  CsiBBProperty() {}
+
+  /// Return the Type of a property.
+  static Type *getType(LLVMContext &C) {
+    // Must match the definition of property type in csi.h
+    return CsiProperty::getCoercedType(
+        C, StructType::get(IntegerType::get(C, 64), nullptr));
+  }
+
+  /// Return a constant value holding this property.
+  Constant *getValueImpl(LLVMContext &C) const override {
+    // Must match the definition of property type in csi.h
+    // StructType *StructTy = getType(C);
+    // return ConstantStruct::get(StructTy,
+    //                            ConstantInt::get(IntegerType::get(C, 64), 0),
+    //                            nullptr);
+    // TODO: This solution works for x86, but should be generalized to support
+    // other architectures in the future.
+    return ConstantInt::get(getType(C), 0);
+  }
+};
+
+class CsiCallProperty : public CsiProperty {
+public:
+  CsiCallProperty() {
+    PropValue.Bits = 0;
   }
 
   /// Return the Type of a property.
-  static StructType *getType(LLVMContext &C);
+  static Type *getType(LLVMContext &C) {
+    // Must match the definition of property type in csi.h
+    return CsiProperty::getCoercedType(
+        C, StructType::get(IntegerType::get(C, PropBits.IsIndirect),
+                           IntegerType::get(C, PropBits.Padding),
+                           nullptr));
+  }
+  /// Return a constant value holding this property.
+  Constant *getValueImpl(LLVMContext &C) const override {
+    // Must match the definition of property type in csi.h
+    // StructType *StructTy = getType(C);
+    // return ConstantStruct::get(
+    //     StructTy,
+    //     ConstantInt::get(IntegerType::get(C, PropBits.IsIndirect),
+    //                      PropValue.IsIndirect),
+    //     ConstantInt::get(IntegerType::get(C, PropBits.Padding), 0),
+    //     nullptr);
+    // TODO: This solution works for x86, but should be generalized to support
+    // other architectures in the future.
+    return ConstantInt::get(getType(C), PropValue.Bits);
+  }
 
-  /// Return a Value holding this property.
-  Value *getValue(IRBuilder<> IRB) const;
+  /// Set the value of the IsIndirect property.
+  void setIsIndirect(bool v) {
+    PropValue.Fields.IsIndirect = v;
+  }
 
-  /// Set the value of the LoadReadBeforeWriteInBB property.
-  void setLoadReadBeforeWriteInBB(bool v);
 private:
-  typedef struct {
-    bool LoadReadBeforeWriteInBB;
+  typedef union {
+    // Must match the definition of property type in csi.h
+    struct {
+      unsigned IsIndirect : 1;
+      uint64_t Padding : 63;
+    } Fields;
+    uint64_t Bits;
   } Property;
 
   /// The underlying values of the properties.
   Property PropValue;
+
+  typedef struct {
+    int IsIndirect;
+    int Padding;
+  } PropertyBits;
+
+  /// The number of bits representing each property.
+  static constexpr PropertyBits PropBits = { 1, (64-1) };
+};
+
+class CsiLoadStoreProperty : public CsiProperty {
+public:
+  CsiLoadStoreProperty() {
+    PropValue.Bits = 0;
+  }
+  /// Return the Type of a property.
+  static Type *getType(LLVMContext &C) {
+    // Must match the definition of property type in csi.h
+    return CsiProperty::getCoercedType(
+        C, StructType::get(IntegerType::get(C, PropBits.Alignment),
+                           IntegerType::get(C, PropBits.IsVtableAccess),
+                           IntegerType::get(C, PropBits.IsConstant),
+                           IntegerType::get(C, PropBits.IsOnStack),
+                           IntegerType::get(C, PropBits.MayBeCaptured),
+                           IntegerType::get(C, PropBits.LoadReadBeforeWriteInBB),
+                           IntegerType::get(C, PropBits.Padding),
+                           nullptr));
+  }
+  /// Return a constant value holding this property.
+  Constant *getValueImpl(LLVMContext &C) const override {
+    // Must match the definition of property type in csi.h
+    // return ConstantStruct::get(
+    //     StructTy,
+    //     ConstantInt::get(IntegerType::get(C, PropBits.Alignment),
+    //                      PropValue.Alignment),
+    //     ConstantInt::get(IntegerType::get(C, PropBits.IsVtableAccess),
+    //                      PropValue.IsVtableAccess),
+    //     ConstantInt::get(IntegerType::get(C, PropBits.IsConstant),
+    //                      PropValue.IsVtableAccess),
+    //     ConstantInt::get(IntegerType::get(C, PropBits.IsOnStack),
+    //                      PropValue.IsVtableAccess),
+    //     ConstantInt::get(IntegerType::get(C, PropBits.MayBeCaptured),
+    //                      PropValue.IsVtableAccess),
+    //     ConstantInt::get(IntegerType::get(C, PropBits.LoadReadBeforeWriteInBB),
+    //                      PropValue.LoadReadBeforeWriteInBB),
+    //     ConstantInt::get(IntegerType::get(C, PropBits.Padding), 0),
+    //     nullptr);
+    return ConstantInt::get(getType(C), PropValue.Bits);
+  }
+
+  /// Set the value of the Alignment property.
+  void setAlignment(char v) {
+    PropValue.Fields.Alignment = v;
+  }
+  /// Set the value of the IsVtableAccess property.
+  void setIsVtableAccess(bool v) {
+    PropValue.Fields.IsVtableAccess = v;
+  }
+  /// Set the value of the IsConstant property.
+  void setIsConstant(bool v) {
+    PropValue.Fields.IsConstant = v;
+  }
+  /// Set the value of the IsOnStack property.
+  void setIsOnStack(bool v) {
+    PropValue.Fields.IsOnStack = v;
+  }
+  /// Set the value of the MayBeCaptured property.
+  void setMayBeCaptured(bool v) {
+    PropValue.Fields.MayBeCaptured = v;
+  }
+  /// Set the value of the LoadReadBeforeWriteInBB property.
+  void setLoadReadBeforeWriteInBB(bool v) {
+    PropValue.Fields.LoadReadBeforeWriteInBB = v;
+  }
+
+private:
+  typedef union {
+    // Must match the definition of property type in csi.h
+    struct {
+      unsigned Alignment : 8;
+      unsigned IsVtableAccess : 1;
+      unsigned IsConstant : 1;
+      unsigned IsOnStack : 1;
+      unsigned MayBeCaptured : 1;
+      unsigned LoadReadBeforeWriteInBB : 1;
+      uint64_t Padding : 53;
+    } Fields;
+    uint64_t Bits;
+  } Property;
+
+  /// The underlying values of the properties.
+  Property PropValue;
+
+  typedef struct {
+    int Alignment;
+    int IsVtableAccess;
+    int IsConstant;
+    int IsOnStack;
+    int MayBeCaptured;
+    int LoadReadBeforeWriteInBB;
+    int Padding;
+  } PropertyBits;
+
+  /// The number of bits representing each property.
+  static constexpr PropertyBits PropBits = { 8, 1, 1, 1, 1, 1, (64-8-1-1-1-1-1) };
 };
 
 /// The Comprehensive Static Instrumentation pass.
@@ -222,18 +462,20 @@ private:
 
   /// Compute CSI properties on the given ordered list of loads and stores.
   void computeLoadAndStoreProperties(
-      SmallVectorImpl<std::pair<Instruction *, CsiProperty>>
-          &LoadAndStoreProperties,
-      SmallVectorImpl<Instruction *> &BBLoadsAndStores);
+      SmallVectorImpl<std::pair<Instruction *, CsiLoadStoreProperty>>
+      &LoadAndStoreProperties,
+      SmallVectorImpl<Instruction *> &BBLoadsAndStores,
+      const DataLayout &DL);
 
   /// Insert calls to the instrumentation hooks.
   /// @{
   void addLoadStoreInstrumentation(Instruction *I, Function *BeforeFn,
                                    Function *AfterFn, Value *CsiId,
                                    Type *AddrType, Value *Addr, int NumBytes,
-                                   CsiProperty Prop);
-  void instrumentLoadOrStore(Instruction *I, CsiProperty Prop,
+                                   CsiLoadStoreProperty &Prop);
+  void instrumentLoadOrStore(Instruction *I, CsiLoadStoreProperty &Prop,
                              const DataLayout &DL);
+  void instrumentAtomic(Instruction *I, const DataLayout &DL);
   void instrumentMemIntrinsic(Instruction *I);
   void instrumentCallsite(Instruction *I);
   void instrumentBasicBlock(BasicBlock &BB);
@@ -424,40 +666,28 @@ Constant *FrontEndDataTable::insertIntoModule(Module &M) const {
   return ConstantExpr::getGetElementPtr(GV->getValueType(), GV, GepArgs);
 }
 
-StructType *CsiProperty::getType(LLVMContext &C) {
-  // Must match the definition of csi_prop_t in csi.h
-  return StructType::get(IntegerType::get(C, 1), IntegerType::get(C, 63), nullptr);
-}
-
-Value *CsiProperty::getValue(IRBuilder<> IRB) const {
-  LLVMContext &C = IRB.getContext();
-  StructType *StructTy = getType(C);
-  Constant *Value = ConstantStruct::get(StructTy,
-        ConstantInt::get(IntegerType::get(C, 1), PropValue.LoadReadBeforeWriteInBB),
-        ConstantInt::get(IntegerType::get(C, 63), 0),
-        nullptr);
-  return Value;
-}
-
-void CsiProperty::setLoadReadBeforeWriteInBB(bool v) {
-  PropValue.LoadReadBeforeWriteInBB = v;
-}
-
 void ComprehensiveStaticInstrumentation::initializeFuncHooks(Module &M) {
   LLVMContext &C = M.getContext();
   IRBuilder<> IRB(C);
-  Type *PropertyTy = CsiProperty::getType(C);
+  Type *FuncPropertyTy = CsiFuncProperty::getType(C);
   CsiFuncEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
-      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), PropertyTy, nullptr));
+      "__csi_func_entry", IRB.getVoidTy(), IRB.getInt64Ty(), FuncPropertyTy,
+      nullptr));
+  Type *FuncExitPropertyTy = CsiFuncExitProperty::getType(C);
   CsiFuncExit = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_func_exit", IRB.getVoidTy(),
-                            IRB.getInt64Ty(), IRB.getInt64Ty(), PropertyTy, nullptr));
+                            IRB.getInt64Ty(), IRB.getInt64Ty(),
+                            FuncExitPropertyTy, nullptr));
+  CsiFuncExit = checkCsiInterfaceFunction(
+      M.getOrInsertFunction("__csi_func_exit", IRB.getVoidTy(),
+                            IRB.getInt64Ty(), IRB.getInt64Ty(),
+                            FuncExitPropertyTy, nullptr));
 }
 
 void ComprehensiveStaticInstrumentation::initializeBasicBlockHooks(Module &M) {
   LLVMContext &C = M.getContext();
   IRBuilder<> IRB(C);
-  Type *PropertyTy = CsiProperty::getType(C);
+  Type *PropertyTy = CsiBBProperty::getType(C);
   CsiBBEntry = checkCsiInterfaceFunction(M.getOrInsertFunction(
       "__csi_bb_entry", IRB.getVoidTy(), IRB.getInt64Ty(), PropertyTy, nullptr));
   CsiBBExit = checkCsiInterfaceFunction(M.getOrInsertFunction(
@@ -467,7 +697,7 @@ void ComprehensiveStaticInstrumentation::initializeBasicBlockHooks(Module &M) {
 void ComprehensiveStaticInstrumentation::initializeCallsiteHooks(Module &M) {
   LLVMContext &C = M.getContext();
   IRBuilder<> IRB(C);
-  Type *PropertyTy = CsiProperty::getType(C);
+  Type *PropertyTy = CsiCallProperty::getType(C);
   CsiBeforeCallsite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_call", IRB.getVoidTy(),
                             IRB.getInt64Ty(), IRB.getInt64Ty(), PropertyTy, nullptr));
@@ -479,24 +709,25 @@ void ComprehensiveStaticInstrumentation::initializeCallsiteHooks(Module &M) {
 void ComprehensiveStaticInstrumentation::initializeLoadStoreHooks(Module &M) {
   LLVMContext &C = M.getContext();
   IRBuilder<> IRB(C);
-  Type *PropertyTy = CsiProperty::getType(C);
+  Type *LoadPropertyTy = CsiLoadStoreProperty::getType(C);
+  Type *StorePropertyTy = CsiLoadStoreProperty::getType(C);
   Type *RetType = IRB.getVoidTy();
   Type *AddrType = IRB.getInt8PtrTy();
   Type *NumBytesType = IRB.getInt32Ty();
 
   CsiBeforeRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_load", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, PropertyTy, nullptr));
+                            AddrType, NumBytesType, LoadPropertyTy, nullptr));
   CsiAfterRead = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_load", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, PropertyTy, nullptr));
+                            AddrType, NumBytesType, LoadPropertyTy, nullptr));
 
   CsiBeforeWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_before_store", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, PropertyTy, nullptr));
+                            AddrType, NumBytesType, StorePropertyTy, nullptr));
   CsiAfterWrite = checkCsiInterfaceFunction(
       M.getOrInsertFunction("__csi_after_store", RetType, IRB.getInt64Ty(),
-                            AddrType, NumBytesType, PropertyTy, nullptr));
+                            AddrType, NumBytesType, StorePropertyTy, nullptr));
 
   MemmoveFn = checkCsiInterfaceFunction(
       M.getOrInsertFunction("memmove", IRB.getInt8PtrTy(), IRB.getInt8PtrTy(),
@@ -524,22 +755,23 @@ int ComprehensiveStaticInstrumentation::getNumBytesAccessed(
 
 void ComprehensiveStaticInstrumentation::addLoadStoreInstrumentation(
     Instruction *I, Function *BeforeFn, Function *AfterFn, Value *CsiId,
-    Type *AddrType, Value *Addr, int NumBytes, CsiProperty Prop) {
+    Type *AddrType, Value *Addr, int NumBytes, CsiLoadStoreProperty &Prop) {
   IRBuilder<> IRB(I);
   Value *PropVal = Prop.getValue(IRB);
-  insertConditionalHookCall(I, BeforeFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
-        IRB.getInt32(NumBytes), PropVal});
+  insertConditionalHookCall(I, BeforeFn,
+                            {CsiId, IRB.CreatePointerCast(Addr, AddrType),
+                                IRB.getInt32(NumBytes), PropVal});
 
   BasicBlock::iterator Iter(I);
   Iter++;
   IRB.SetInsertPoint(&*Iter);
-  PropVal = Prop.getValue(IRB);
-  insertConditionalHookCall(&*Iter, AfterFn, {CsiId, IRB.CreatePointerCast(Addr, AddrType),
-        IRB.getInt32(NumBytes), PropVal});
+  insertConditionalHookCall(&*Iter, AfterFn,
+                            {CsiId, IRB.CreatePointerCast(Addr, AddrType),
+                                IRB.getInt32(NumBytes), PropVal});
 }
 
 void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(
-    Instruction *I, CsiProperty Prop, const DataLayout &DL) {
+    Instruction *I, CsiLoadStoreProperty &Prop, const DataLayout &DL) {
   IRBuilder<> IRB(I);
   bool IsWrite = isa<StoreInst>(I);
   Value *Addr = IsWrite ? cast<StoreInst>(I)->getPointerOperand()
@@ -561,6 +793,12 @@ void ComprehensiveStaticInstrumentation::instrumentLoadOrStore(
     addLoadStoreInstrumentation(I, CsiBeforeRead, CsiAfterRead, CsiId, AddrType,
                                 Addr, NumBytes, Prop);
   }
+}
+
+void ComprehensiveStaticInstrumentation::instrumentAtomic(
+    Instruction *I, const DataLayout &DL) {
+  // For now, print a message that this code contains atomics.
+  dbgs() << "WARNING: Uninstrumented atomic operations in program-under-test!\n";
 }
 
 // If a memset intrinsic gets inlined by the code gen, we will miss races on it.
@@ -598,12 +836,13 @@ void ComprehensiveStaticInstrumentation::instrumentBasicBlock(BasicBlock &BB) {
   //LLVMContext &C = IRB.getContext();
   uint64_t LocalId = BasicBlockFED.add(BB);
   Value *CsiId = BasicBlockFED.localToGlobalId(LocalId, IRB);
-  CsiProperty Prop;
+  CsiBBProperty Prop;
   TerminatorInst *TI = BB.getTerminator();
   Value *PropVal = Prop.getValue(IRB);
-
-  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiBBEntry, {CsiId, PropVal});
-  insertConditionalHookCall(TI, CsiBBExit, {CsiId, PropVal});
+  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiBBEntry,
+                            {CsiId, PropVal});
+  insertConditionalHookCall(TI, CsiBBExit,
+                            {CsiId, PropVal});
 }
 
 void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
@@ -640,9 +879,11 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
     FuncId = IRB.getInt64(CsiCallsiteUnknownTargetId);
   }
   assert(FuncId != NULL);
-  CsiProperty Prop;
+  CsiCallProperty Prop;
+  Prop.setIsIndirect(!Called);
   Value *PropVal = Prop.getValue(IRB);
-  insertConditionalHookCall(I, CsiBeforeCallsite, {CallsiteId, FuncId, PropVal});
+  insertConditionalHookCall(I, CsiBeforeCallsite,
+                            {CallsiteId, FuncId, PropVal});
 
   BasicBlock::iterator Iter(I);
   if (IsInvoke) {
@@ -661,20 +902,23 @@ void ComprehensiveStaticInstrumentation::instrumentCallsite(Instruction *I) {
     CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
     if (FuncIdGV != NULL) FuncId = IRB.CreateLoad(FuncIdGV);
     PropVal = Prop.getValue(IRB);
-    insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiAfterCallsite, {CallsiteId, FuncId, PropVal});
+    insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiAfterCallsite,
+                              {CallsiteId, FuncId, PropVal});
 
     BasicBlock *UnwindBB = II->getUnwindDest();
     IRB.SetInsertPoint(&*UnwindBB->getFirstInsertionPt());
     CallsiteId = CallsiteFED.localToGlobalId(LocalId, IRB);
     if (FuncIdGV != NULL) FuncId = IRB.CreateLoad(FuncIdGV);
     PropVal = Prop.getValue(IRB);
-    insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiAfterCallsite, {CallsiteId, FuncId, PropVal});
+    insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiAfterCallsite,
+                              {CallsiteId, FuncId, PropVal});
   } else {
     // Simple call instruction; there is only one "after" position.
     Iter++;
     IRB.SetInsertPoint(&*Iter);
     PropVal = Prop.getValue(IRB);
-    insertConditionalHookCall(&*Iter, CsiAfterCallsite, {CallsiteId, FuncId, PropVal});
+    insertConditionalHookCall(&*Iter, CsiAfterCallsite,
+                              {CallsiteId, FuncId, PropVal});
   }
 }
 
@@ -864,23 +1108,91 @@ bool ComprehensiveStaticInstrumentation::shouldNotInstrumentFunction(
   return false;
 }
 
+static bool isVtableAccess(Instruction *I) {
+  if (MDNode *Tag = I->getMetadata(LLVMContext::MD_tbaa))
+    return Tag->isTBAAVtableAccess();
+  return false;
+}
+
+static bool addrPointsToConstantData(Value *Addr) {
+  // If this is a GEP, just analyze its pointer operand.
+  if (GetElementPtrInst *GEP = dyn_cast<GetElementPtrInst>(Addr))
+    Addr = GEP->getPointerOperand();
+
+  if (GlobalVariable *GV = dyn_cast<GlobalVariable>(Addr)) {
+    if (GV->isConstant()) {
+      return true;
+    }
+  } else if (LoadInst *L = dyn_cast<LoadInst>(Addr)) {
+    if (isVtableAccess(L)) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool isAtomic(Instruction *I) {
+  if (LoadInst *LI = dyn_cast<LoadInst>(I))
+    return LI->isAtomic() && LI->getSynchScope() == CrossThread;
+  if (StoreInst *SI = dyn_cast<StoreInst>(I))
+    return SI->isAtomic() && SI->getSynchScope() == CrossThread;
+  if (isa<AtomicRMWInst>(I))
+    return true;
+  if (isa<AtomicCmpXchgInst>(I))
+    return true;
+  if (isa<FenceInst>(I))
+    return true;
+  return false;
+}
+
 void ComprehensiveStaticInstrumentation::computeLoadAndStoreProperties(
-    SmallVectorImpl<std::pair<Instruction *, CsiProperty>> &LoadAndStoreProperties,
-    SmallVectorImpl<Instruction *> &BBLoadsAndStores) {
+    SmallVectorImpl<std::pair<Instruction *, CsiLoadStoreProperty>> &LoadAndStoreProperties,
+    SmallVectorImpl<Instruction *> &BBLoadsAndStores,
+    const DataLayout &DL) {
   SmallSet<Value *, 8> WriteTargets;
 
   for (SmallVectorImpl<Instruction *>::reverse_iterator
-           It = BBLoadsAndStores.rbegin(),
-           E = BBLoadsAndStores.rend();
+         It = BBLoadsAndStores.rbegin(),
+         E = BBLoadsAndStores.rend();
        It != E; ++It) {
     Instruction *I = *It;
-    CsiProperty Prop;
+    unsigned Alignment;
     if (StoreInst *Store = dyn_cast<StoreInst>(I)) {
-      WriteTargets.insert(Store->getPointerOperand());
+      Value *Addr = Store->getPointerOperand();
+      WriteTargets.insert(Addr);
+      CsiLoadStoreProperty Prop;
+      // Update alignment property data
+      Alignment = Store->getAlignment();
+      Prop.setAlignment(Alignment);
+      // Set vtable-access property
+      Prop.setIsVtableAccess(isVtableAccess(Store));
+      // Set constant-data-access property
+      Prop.setIsConstant(addrPointsToConstantData(Addr));
+      Value *Obj = GetUnderlyingObject(Addr, DL);
+      // Set is-on-stack property
+      Prop.setIsOnStack(isa<AllocaInst>(Obj));
+      // Set may-be-captured property
+      Prop.setMayBeCaptured(isa<GlobalValue>(Obj) ||
+                            PointerMayBeCaptured(Addr, true, true));
       LoadAndStoreProperties.push_back(std::make_pair(I, Prop));
     } else {
       LoadInst *Load = cast<LoadInst>(I);
       Value *Addr = Load->getPointerOperand();
+      CsiLoadStoreProperty Prop;
+      // Update alignment property data
+      Alignment = Load->getAlignment();
+      Prop.setAlignment(Alignment);
+      // Set vtable-access property
+      Prop.setIsVtableAccess(isVtableAccess(Load));
+      // Set constant-data-access-property
+      Prop.setIsConstant(addrPointsToConstantData(Addr));
+      Value *Obj = GetUnderlyingObject(Addr, DL);
+      // Set is-on-stack property
+      Prop.setIsOnStack(isa<AllocaInst>(Obj));
+      // Set may-be-captured property
+      Prop.setMayBeCaptured(isa<GlobalValue>(Obj) ||
+                            PointerMayBeCaptured(Addr, true, true));
+      // Set load-read-before-write-in-bb property
       bool HasBeenSeen = WriteTargets.count(Addr) > 0;
       Prop.setLoadReadBeforeWriteInBB(HasBeenSeen);
       LoadAndStoreProperties.push_back(std::make_pair(I, Prop));
@@ -907,18 +1219,22 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
     return;
   }
 
-  SmallVector<std::pair<Instruction *, CsiProperty>, 8> LoadAndStoreProperties;
+  SmallVector<std::pair<Instruction *, CsiLoadStoreProperty>, 8>
+    LoadAndStoreProperties;
   SmallVector<Instruction *, 8> ReturnInstructions;
   SmallVector<Instruction *, 8> MemIntrinsics;
   SmallVector<Instruction *, 8> Callsites;
   std::vector<BasicBlock *> BasicBlocks;
+  SmallVector<Instruction*, 8> AtomicAccesses;
   const DataLayout &DL = F.getParent()->getDataLayout();
 
   // Compile lists of all instrumentation points before anything is modified.
   for (BasicBlock &BB : F) {
     SmallVector<Instruction *, 8> BBLoadsAndStores;
     for (Instruction &I : BB) {
-      if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
+      if (isAtomic(&I))
+        AtomicAccesses.push_back(&I);
+      else if (isa<LoadInst>(I) || isa<StoreInst>(I)) {
         BBLoadsAndStores.push_back(&I);
       } else if (isa<ReturnInst>(I)) {
         ReturnInstructions.push_back(&I);
@@ -928,9 +1244,11 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
         } else {
           Callsites.push_back(&I);
         }
+        computeLoadAndStoreProperties(LoadAndStoreProperties, BBLoadsAndStores,
+                                      DL);
       }
     }
-    computeLoadAndStoreProperties(LoadAndStoreProperties, BBLoadsAndStores);
+    computeLoadAndStoreProperties(LoadAndStoreProperties, BBLoadsAndStores, DL);
     BasicBlocks.push_back(&BB);
   }
 
@@ -947,8 +1265,14 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
 
   // Do this work in a separate loop after copying the iterators so that we
   // aren't modifying the list as we're iterating.
-  for (std::pair<Instruction *, CsiProperty> p : LoadAndStoreProperties) {
+  for (std::pair<Instruction *, CsiLoadStoreProperty> p : LoadAndStoreProperties) {
     instrumentLoadOrStore(p.first, p.second, DL);
+  }
+
+  // Instrument atomic memory accesses in any case (they can be used to
+  // implement synchronization).
+  for (Instruction *I : AtomicAccesses) {
+    instrumentAtomic(I, DL);
   }
 
   for (Instruction *I : MemIntrinsics) {
@@ -962,16 +1286,19 @@ void ComprehensiveStaticInstrumentation::instrumentFunction(Function &F) {
   // Instrument function entry/exit points.
   IRBuilder<> IRB(&*F.getEntryBlock().getFirstInsertionPt());
   //LLVMContext &C = IRB.getContext();
-  CsiProperty FuncEntryProp, FuncExitProp;
+  CsiFuncProperty FuncEntryProp;
+  CsiFuncExitProperty FuncExitProp;
   Value *FuncId = FunctionFED.localToGlobalId(LocalId, IRB);
   Value *PropVal = FuncEntryProp.getValue(IRB);
-  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiFuncEntry, {FuncId, PropVal});
+  insertConditionalHookCall(&*IRB.GetInsertPoint(), CsiFuncEntry,
+                            {FuncId, PropVal});
 
   for (Instruction *I : ReturnInstructions) {
     IRBuilder<> IRBRet(I);
     uint64_t ExitLocalId = FunctionExitFED.add(F);
     Value *ExitCsiId = FunctionExitFED.localToGlobalId(ExitLocalId, IRBRet);
     PropVal = FuncExitProp.getValue(IRBRet);
-    insertConditionalHookCall(I, CsiFuncExit, {ExitCsiId, FuncId, PropVal});
+    insertConditionalHookCall(I, CsiFuncExit,
+                              {ExitCsiId, FuncId, PropVal});
   }
 }
